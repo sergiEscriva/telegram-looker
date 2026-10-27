@@ -609,7 +609,7 @@ async def _al_terminar_canal(ctx: Contexto, grupo: list):
     if ctx.opc.notificar and not ctx.detener.is_set():
         try:
             await principal.cliente.send_message(
-                "me", f"✅ **TG Downloader** terminó «{principal.titulo}»\n{resumen_stats(stats)}\n📂 {principal.carpeta}")
+                "me", f"✅ Descarga terminada: «{principal.titulo}»\n{resumen_stats(stats)}\n📂 {principal.carpeta}")
         except Exception as e:  # noqa: BLE001
             ctx.informe.log(f"No se pudo enviar la notificación: {e}", "aviso")
 

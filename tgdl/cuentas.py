@@ -3,7 +3,7 @@ import re
 
 from telethon import TelegramClient, errors
 
-from .config import BASE, SESIONES
+from .config import BASE, SESIONES, cargar_config
 
 _NOMBRE_VALIDO = re.compile(r"^[\w-]{1,32}$")
 
@@ -21,6 +21,11 @@ class GestorCuentas:
         self.clientes: dict = {}
         self.pendientes: dict = {}  # logins a medias desde el panel web
         self._info: dict = {}
+        cfg = cargar_config()
+        # Vacío = valores normales de Telethon (versión de la librería y sistema operativo real)
+        self.dispositivo = {"modelo": cfg.get("NOMBRE_DISPOSITIVO") or "PC",
+                            "sistema": cfg.get("SISTEMA_DISPOSITIVO") or None,
+                            "version": cfg.get("VERSION_APP") or None}
         SESIONES.mkdir(exist_ok=True)
         self._migrar_sesion_antigua()
 
@@ -40,7 +45,9 @@ class GestorCuentas:
             str(SESIONES / validar_nombre(nombre)), self.api_id, self.api_hash,
             flood_sleep_threshold=3600,      # espera sola FloodWaits de hasta 1 h (se avisa en el log)
             connection_retries=10, retry_delay=5, request_retries=10,
-            device_model="TG Downloader", app_version="2.0",
+            # Lo que aparece en Telegram > Ajustes > Dispositivos (configurable en el .env)
+            device_model=self.dispositivo["modelo"], system_version=self.dispositivo["sistema"],
+            app_version=self.dispositivo["version"],
             base_logger=f"tgdl.cuenta.{nombre}",  # permite saber de qué cuenta es cada aviso
         )
 
