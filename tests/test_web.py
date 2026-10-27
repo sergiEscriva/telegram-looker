@@ -93,3 +93,16 @@ def test_ver_aisla_archivos(panel, tmp_path):
         r = await c.get("/ver/-1001/../../etc/passwd")
         assert r.status == 404
     _correr(panel, prueba)
+
+
+def test_nombre_de_dispositivo_configurable(tmp_path, monkeypatch):
+    monkeypatch.setattr(tgdl.cuentas, "SESIONES", tmp_path / "sesiones")
+    monkeypatch.setenv("NOMBRE_DISPOSITIVO", "Portátil de casa")
+    monkeypatch.setenv("VERSION_APP", "5.1")
+    gestor = tgdl.cuentas.GestorCuentas(12345, "0" * 32)
+    cliente = gestor._crear_cliente("prueba")
+    assert cliente._init_request.device_model == "Portátil de casa"
+    assert cliente._init_request.app_version == "5.1"
+    monkeypatch.delenv("NOMBRE_DISPOSITIVO")
+    monkeypatch.setattr(tgdl.cuentas, "cargar_config", lambda: {})
+    assert tgdl.cuentas.GestorCuentas(12345, "0" * 32)._crear_cliente("otra")._init_request.device_model == "PC"

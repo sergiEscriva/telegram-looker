@@ -177,6 +177,7 @@ datos.db                        # Base de datos local de control y reanudacion
 - El panel solo escucha en `127.0.0.1` y acepta peticiones que vengan de su propia pagina: cada arranque genera un token secreto, y se rechazan otros origenes y otros nombres de host. Asi otra web abierta en el navegador no puede lanzar descargas ni leer tus datos. Si recargas el panel tras reiniciarlo, el token se renueva solo.
 - Los archivos descargados se abren desde el panel aislados (`sandbox`): un `.html` o `.svg` de un canal se entrega como descarga y no puede usar el panel.
 - El archivo `.gitignore` incluido ya viene preconfigurado para ignorar `.env`, la carpeta `sesiones/`, `descargas/` y `datos.db`.
+- En Telegram > Ajustes > Dispositivos cada sesion aparece con el nombre de la app que creaste en my.telegram.org y el modelo "PC". Puedes cambiar el modelo, el sistema y la version con `NOMBRE_DISPOSITIVO`, `SISTEMA_DISPOSITIVO` y `VERSION_APP` en el `.env` (ver `.env.ejemplo`).
 - Utiliza la herramienta respetando los terminos de servicio de Telegram y para contenido al que tengas derecho legitimo de acceso.
 
 ---
