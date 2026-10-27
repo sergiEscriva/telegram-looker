@@ -1,86 +1,177 @@
-# TG Downloader
+# 📥 TG Downloader (Telegram Media Downloader)
 
-Descarga **automáticamente todo** el contenido de canales y grupos de Telegram (fotos, vídeos, audios, documentos y stickers) con **una o varias cuentas**, desde un **panel web** o desde la consola.
+Descargador automático masivo para canales y grupos de Telegram (fotos, vídeos, audios, documentos y stickers). Incluye soporte para **múltiples cuentas**, **modo vigilancia en tiempo real**, **deduplicación inteligente**, **archivo HTML navegable sin conexión** y un **panel web con diseño Windows Vista (Aero)**.
 
-## Inicio rápido
+---
 
-| Quiero… | Haz doble clic en |
-|---|---|
-| Usar la interfaz gráfica (recomendado) | `panel.bat` → se abre `http://127.0.0.1:8765` |
-| Usar la consola | `iniciar.bat` |
+## ✨ Características principales
 
-La primera vez se instala todo solo. En el panel: **Cuentas → Añadir cuenta** (teléfono + código) y después **Nueva descarga**.
+- 🪟 **Panel Web estilo Windows Vista Aero:**
+  - Ventana translúcida de cristal con controles completos (minimizar, maximizar, restaurar).
+  - Barra de tareas integrada con botón de inicio y reloj en directo.
+  - Gadget lateral con velocímetro en tiempo real.
+  - Selección visual interactiva de canales, cuentas y filtros.
+  - Diálogos y globos de notificación clásicos de Windows Vista.
+- 👥 **Soporte multi-cuenta:**
+  - Conecta tantas cuentas de Telegram como quieras.
+  - Dos modos de trabajo:
+    - `canal`: cada cuenta descarga canales distintos en paralelo.
+    - `mensajes`: todas las cuentas colaboran repartiéndose los mensajes de un mismo canal para máxima velocidad.
+- 🌐 **Archivo web HTML sin conexión:**
+  - Cada canal genera un archivo interactivo `index.html` estilo explorador de Windows Vista.
+  - Búsqueda instantánea en el texto de los mensajes y nombres de archivo.
+  - Filtros rápidos por tipo (Fotos, Vídeos, Audios, Documentos, Texto).
+  - Visor de fotos a pantalla completa estilo *Galería fotográfica de Windows*.
+  - 100% autónomo (no requiere conexión a internet para ver el contenido guardado).
+- ♻️ **Deduplicación inteligente (SHA-256):**
+  - Si un archivo ya fue descargado previamente (incluso en otro canal), no se vuelve a descargar: se vincula automáticamente ahorrando ancho de banda y espacio en disco.
+- 📁 **Organización automática:**
+  - Carpetas categorizadas (`fotos/`, `videos/`, `audios/`, `documentos/`, `stickers/`).
+  - Álbumes agrupados en subcarpetas propias con fecha.
+  - Separación por temas en grupos con foros.
+  - Descarga opcional de comentarios anidados a cada publicación.
+- 👀 **Modo vigilancia continua (`--seguir`):**
+  - Tras descargar todo el historial del canal, el programa se queda a la escucha y descarga al instante cualquier archivo nuevo que se publique.
+- 🛡️ **Seguridad y fiabilidad:**
+  - Base de datos local SQLite: si se interrumpe la descarga, continúa justo donde se quedó.
+  - Gestión automática de límites de Telegram (*FloodWait*) con reintentos transparentes.
+  - Límite de velocidad configurable y control de espacio libre mínimo en disco.
+  - Notificación automática a tus *Mensajes guardados* de Telegram al finalizar.
 
-> Las credenciales `API_ID` / `API_HASH` ya están en [`.env`](.env). Si faltan, el programa te las pide paso a paso.
+---
 
-## Funciones
+## 🚀 Inicio rápido (Windows)
 
-- 👥 **Varias cuentas** con dos modos de reparto:
-  - `canal`: cada cuenta descarga canales distintos en paralelo.
-  - `mensajes`: todas las cuentas se reparten los mensajes de un mismo canal (más rápido; ver aviso abajo).
-- 👀 **Modo vigilancia**: tras el historial, descarga los mensajes nuevos al instante.
-- ♻️ **Sin duplicados**: un archivo repetido (aunque esté en otro canal) no se vuelve a bajar; se crea un enlace duro que no ocupa espacio.
-- 🔎 **Filtros**: por tipo, fechas, tamaño, extensiones y texto.
-- 🗂 **Organización**: álbumes en su propia carpeta, temas de foros en carpetas, nombres originales o basados en el texto.
-- 💬 **Comentarios** de las publicaciones (opcional).
-- 🌐 **Archivo HTML** navegable sin conexión de cada canal (búsqueda, filtros, visor de imágenes).
-- ⏯ **Reanudable** (SQLite): si se corta, continúa donde se quedó; los fallos se reintentan solos.
-- 🛡 FloodWait, reconexiones, referencias caducadas, **límite de velocidad**, **parada si queda poco disco**.
-- 🔔 **Aviso** en tus *Mensajes guardados* al terminar cada canal.
+### 1. Requisitos
+- Windows 10 / 11 (o Linux / macOS).
+- [Python 3.10 o superior](https://www.python.org/downloads/) *(marcar la casilla "Add python.exe to PATH" durante la instalación)*.
 
-## Consola
+### 2. Clonar y configurar credenciales
+
+1. Clona el repositorio:
+   ```bash
+   git clone https://github.com/TU_USUARIO/TU_REPOSITORIO.git
+   cd TU_REPOSITORIO
+   ```
+
+2. Crea tu archivo `.env` a partir de la plantilla:
+   ```bash
+   copy .env.ejemplo .env
+   ```
+
+3. Obtén tus claves gratuitas de la API de Telegram:
+   - Entra en [https://my.telegram.org](https://my.telegram.org) e inicia sesión con tu número de teléfono.
+   - Ve a **API development tools**.
+   - Crea una app con cualquier nombre y copia tu **API_ID** y **API_HASH**.
+   - Pégalos dentro del archivo `.env`:
+     ```env
+     API_ID=12345678
+     API_HASH=abcdef1234567890abcdef1234567890
+     ```
+
+---
+
+## 💻 Uso
+
+### Opción A: Panel gráfico Web (Recomendado)
+
+Haz doble clic en:
+```
+panel.bat
+```
+- Se instalarán automáticamente las dependencias en su propio entorno virtual si es la primera vez.
+- Se abrirá tu navegador con la interfaz Vista en `http://127.0.0.1:8765`.
+- **Añadir cuenta:** Haz clic en **Añadir cuenta**, introduce tu teléfono y escribe el código oficial que te enviará Telegram.
+- **Descargar:** Ve a **Nueva descarga**, selecciona tu cuenta y el canal que desees de la lista y pulsa **Iniciar descarga**.
+
+---
+
+### Opción B: Consola / Terminal
+
+Haz doble clic en:
+```
+iniciar.bat
+```
+*(O ejecútalo desde el terminal con parámetros)*:
 
 ```powershell
-.\iniciar.bat                                   # menú interactivo (admite 1,3,5-8)
-.\iniciar.bat @canal                            # un canal
-.\iniciar.bat @canal --seguir --comentarios     # + vigilancia y comentarios
-.\iniciar.bat @c1 @c2 --reparto canal           # varios canales, una cuenta cada uno
-.\iniciar.bat @canal --reparto mensajes         # todas las cuentas en el mismo canal
+# Menú interactivo para elegir canal
+.\iniciar.bat
+
+# Descargar un canal concreto
+.\iniciar.bat @canal
+
+# Descargar con modo vigilancia y comentarios
+.\iniciar.bat @canal --seguir --comentarios
+
+# Varios canales en paralelo con cuentas separadas
+.\iniciar.bat @canal1 @canal2 --reparto canal
+
+# Filtrar solo vídeos de más de 50MB desde 2025
 .\iniciar.bat @canal -t videos --min-tamano 50MB --desde 2025-01-01
-.\iniciar.bat --añadir-cuenta trabajo           # añadir otra cuenta
-.\iniciar.bat --listar-cuentas | --listar       # ver cuentas / canales
-.\iniciar.bat @canal --regenerar-html           # rehacer el archivo HTML
+
+# Añadir una nueva cuenta a la colección
+.\iniciar.bat --añadir-cuenta trabajo
+
+# Listar canales o cuentas disponibles
+.\iniciar.bat --listar
+.\iniciar.bat --listar-cuentas
+
+# Regenerar el archivo web HTML de un canal
+.\iniciar.bat @canal --regenerar-html
 ```
 
-<details><summary>Todas las opciones</summary>
+---
 
-| Opción | Descripción |
+## ⚙️ Opciones de la línea de comandos
+
+| Parámetro | Descripción |
 |---|---|
-| `--cuentas a,b` | Cuentas a usar (por defecto todas) |
-| `--añadir-cuenta N` / `--eliminar-cuenta N` | Gestionar cuentas |
-| `--reparto canal\|mensajes` | Cómo se reparten las cuentas |
-| `-o`, `--salida` | Carpeta de destino |
-| `-n`, `--hilos` | Descargas simultáneas por cuenta (def. 3) |
-| `--seguir` | Modo vigilancia |
-| `--comentarios` | Descargar comentarios |
-| `--nombres original\|texto` | Cómo nombrar los archivos |
-| `--sin-albumes` / `--sin-deduplicar` / `--sin-html` / `--sin-notificar` | Desactivar funciones |
-| `--limite-velocidad 5MB` | Velocidad máxima total por segundo |
-| `--espacio-minimo 1GB` | Se detiene si queda menos espacio |
-| `-t`, `--tipos` | `fotos,videos,audios,documentos,stickers` |
-| `--desde` / `--hasta` | Fechas `AAAA-MM-DD` |
-| `--min-tamano` / `--max-tamano` | p. ej. `10MB`, `2GB` |
-| `--ext` / `--excluir-ext` | p. ej. `mp4,mkv` |
-| `--buscar TEXTO` | Solo archivos cuyo texto/nombre lo contenga |
-</details>
+| `-t`, `--tipos` | Tipos a descargar: `fotos,videos,audios,documentos,stickers` |
+| `--seguir` | Modo vigilancia: tras el historial, espera y descarga mensajes nuevos en vivo |
+| `--comentarios` | Descargar archivos adjuntos en los comentarios de cada post |
+| `--desde` / `--hasta` | Rango de fechas en formato `AAAA-MM-DD` |
+| `--min-tamano` / `--max-tamano` | Filtro de tamaño (ej: `10MB`, `1.5GB`) |
+| `--ext` / `--excluir-ext` | Incluir o excluir extensiones (ej: `mp4,mkv,pdf`) |
+| `--buscar TEXTO` | Descargar únicamente mensajes cuyo texto o nombre coincida |
+| `--cuentas a,b` | Nombres de las cuentas a usar (por defecto todas las añadidas) |
+| `--reparto canal\|mensajes` | Estrategia de reparto entre cuentas |
+| `-n`, `--hilos` | Descargas simultáneas por cuenta (por defecto 3) |
+| `-o`, `--salida` | Carpeta de descarga personalizada |
+| `--limite-velocidad 5MB` | Límite de ancho de banda máximo por segundo |
+| `--espacio-minimo 2GB` | Detiene las descargas si el disco baja de este espacio libre |
+| `--sin-deduplicar` | Desactiva el cálculo de hashes SHA-256 para omitir duplicados |
+| `--sin-albumes` | Guarda todas las fotos juntas sin subcarpetas de álbum |
+| `--sin-html` | No genera el archivo interactivo `index.html` |
+| `--sin-notificar` | No envía mensaje de aviso a Telegram al finalizar |
 
-## Estructura
+---
+
+## 📂 Estructura de carpetas generada
 
 ```
-descargas/<Canal>/
-├── fotos/ videos/ audios/ documentos/ stickers/
-├── albumes/<fecha>_<id>/        # álbumes
-├── temas/<Tema>/...             # grupos con foros
-├── comentarios/<publicación>/   # con --comentarios
-└── index.html                   # archivo navegable
-sesiones/<cuenta>.session        # una por cuenta (¡no las compartas!)
-datos.db                         # progreso, duplicados e historial
+descargas/
+└── <Nombre_Del_Canal>/
+    ├── fotos/                  # Fotos sueltas
+    ├── videos/                 # Vídeos y clips
+    ├── audios/                 # Mensajes de voz y pistas de audio
+    ├── documentos/             # Archivos, PDFs, ejecutables, etc.
+    ├── stickers/               # Stickers animados y estáticos
+    ├── albumes/<fecha>_<id>/   # Fotos y vídeos agrupados por álbum
+    ├── temas/<Nombre_Tema>/    # Contenido clasificado por tema de foro
+    ├── comentarios/<post_id>/  # Respuestas y debates
+    └── index.html              # Archivo navegable sin conexión estilo Vista
+
+sesiones/
+└── <nombre>.session            # Sesiones cifradas de Telegram (¡nunca las compartas!)
+
+datos.db                        # Base de datos local de control y reanudación
 ```
 
-## Avisos
+---
 
-> **Varias cuentas:** Telegram puede restringir cuentas que usa para saltarse sus límites. Usa cuentas antiguas, no subas `--hilos` por encima de 5 y prefiere el reparto `canal`.
+## 🔒 Privacidad y seguridad
 
-> **No abras el panel y la consola a la vez con la misma cuenta**: la sesión queda bloqueada.
-
-> Usa la herramienta para contenido al que tengas acceso legítimo, respetando los derechos de autor y los términos de Telegram.
+- Las sesiones de Telegram (`sesiones/*.session`) y las credenciales del archivo `.env` contienen tus claves de acceso privadas. **Nunca las subas a repositorios públicos ni las compartas**.
+- El archivo `.gitignore` incluido ya viene preconfigurado para ignorar `.env`, la carpeta `sesiones/`, `descargas/` y `datos.db`.
+- Utiliza la herramienta respetando los términos de servicio de Telegram y para contenido al que tengas derecho legítimo de acceso.
