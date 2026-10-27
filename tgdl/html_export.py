@@ -41,15 +41,41 @@ def _recoger(bd, canal_id: int):
     return carpeta, datos
 
 
+PARTE = 2000              # mensajes por parte en canales grandes
+CARPETA_PARTES = "archivo_datos"
+
+
+def _json(valor) -> str:
+    # "<" se escapa siempre para que ningún texto pueda cerrar el <script>.
+    return json.dumps(valor, ensure_ascii=False).replace("<", "\\u003c")
+
+
 def _escribir(carpeta: Path, datos: dict) -> Path:
-    """Genera y guarda el index.html (lento con canales grandes: puede ir en otro hilo)."""
-    # "<" se escapa siempre dentro del JSON para que ningún texto pueda cerrar el <script>.
-    json_datos = json.dumps(datos, ensure_ascii=False).replace("<", "\\u003c")
-    valores = {"__TITULO__": _escapar(datos["titulo"]), "__DATOS__": json_datos}
+    """Genera y guarda el index.html (lento con canales grandes: puede ir en otro hilo).
+
+    Los canales grandes se parten: el index.html lleva los primeros PARTE mensajes y el resto va
+    en archivo_datos/parte-NNNN.js, que la página carga poco a poco. Así abre al instante aunque
+    el canal tenga cientos de miles de mensajes.
+    """
+    carpeta.mkdir(parents=True, exist_ok=True)
+    dir_partes = carpeta / CARPETA_PARTES
+    for viejo in dir_partes.glob("parte-*.js") if dir_partes.is_dir() else ():
+        viejo.unlink()
+    mensajes = datos["mensajes"]
+    partes = []
+    if len(mensajes) > PARTE:
+        dir_partes.mkdir(exist_ok=True)
+        for n, inicio in enumerate(range(PARTE, len(mensajes), PARTE), start=2):
+            nombre = f"{CARPETA_PARTES}/parte-{n:04d}.js"
+            (carpeta / nombre).write_text(f"__parte({_json(mensajes[inicio:inicio + PARTE])});\n", encoding="utf-8")
+            partes.append(nombre)
+    elif dir_partes.is_dir() and not any(dir_partes.iterdir()):
+        dir_partes.rmdir()
+    datos = {**datos, "mensajes": mensajes[:PARTE], "partes": partes}
+    valores = {"__TITULO__": _escapar(datos["titulo"]), "__DATOS__": _json(datos)}
     # Una sola pasada: lo que se inserta nunca se vuelve a interpretar como marcador
     # (un canal llamado "__DATOS__" no puede meter el JSON sin escapar en el HTML).
     html = re.sub(r"__TITULO__|__DATOS__", lambda m: valores[m.group(0)], _PLANTILLA)
-    carpeta.mkdir(parents=True, exist_ok=True)
     ruta = carpeta / "index.html"
     ruta.write_text(html, encoding="utf-8")
     return ruta
@@ -240,23 +266,37 @@ const enl = s => esc(s).replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_
 $("#titulo").textContent = D.titulo; $("#av").textContent = ((D.titulo||"").trim()[0]||"?").toUpperCase();
 document.title = D.titulo + " · Archivo de Telegram";
 
-// Agrupar: publicaciones (con álbumes unidos) y comentarios por publicación
+// Agrupar: publicaciones (con álbumes unidos) y comentarios por publicación.
+// En canales grandes los mensajes llegan por partes (archivo_datos/parte-*.js), así que todo es incremental.
 const coms = {}, posts = [];
-for (const m of D.mensajes) {
-  if (m.p != null) { (coms[m.p] = coms[m.p] || []).push(m); continue; }
-  const ult = posts[posts.length-1];
-  if (m.a && ult && ult.a === m.a) { ult.items.push(m); ult.ids.push(m.i); if (m.t) ult.t = ult.t || m.t; }
-  else posts.push({a:m.a, f:m.f, t:m.t, tm:m.tm, i:m.i, ids:[m.i], items:[m]});
+let cargadas = 1, version = 0;
+function anadir(msgs) {
+  const nuevos = [];
+  for (const m of msgs) {
+    if (m.p != null) { (coms[m.p] = coms[m.p] || []).push(m); continue; }
+    const ult = posts[posts.length-1];
+    if (m.a && ult && ult.a === m.a) { ult.items.push(m); ult.ids.push(m.i); ult.tipos.add(m.ty); if (m.t) ult.t = ult.t || m.t; }
+    else { const p = {a:m.a, f:m.f, t:m.t, tm:m.tm, i:m.i, ids:[m.i], items:[m], tipos:new Set([m.ty])}; posts.push(p); nuevos.push(p); }
+  }
+  version++;
+  return nuevos;
 }
-for (const p of posts) {
-  p.c = p.ids.flatMap(i => coms[i] || []);
-  p.tipos = new Set(p.items.map(m => m.ty));
-  p.busq = (p.t + " " + p.items.map(m => m.n||"").join(" ") + " " + p.c.map(c => c.t).join(" ")).toLowerCase();
+const comentarios = p => p.ids.flatMap(i => coms[i] || []);
+function busq(p) {  // texto de búsqueda (se recalcula si han llegado comentarios nuevos)
+  if (p._v !== version) {
+    p._b = (p.t + " " + p.items.map(m => m.n||"").join(" ") + " " + comentarios(p).map(c => c.t).join(" ")).toLowerCase();
+    p._v = version;
+  }
+  return p._b;
 }
-const fechas = posts.map(p => p.f).filter(Boolean);
-$("#meta").textContent = `${posts.length} publicaciones · ${D.archivos} archivos · ${D.tamano}` +
-  (fechas.length ? ` · ${new Date(fechas[0]).toLocaleDateString()} – ${new Date(fechas[fechas.length-1]).toLocaleDateString()}` : "") +
-  ` · generado ${D.generado}`;
+function pintarMeta() {
+  const a = posts.find(p => p.f), b = [...posts].reverse().find(p => p.f);
+  $("#meta").textContent = `${posts.length} publicaciones · ${D.archivos} archivos · ${D.tamano}` +
+    (a ? ` · ${new Date(a.f).toLocaleDateString()} – ${new Date(b.f).toLocaleDateString()}` : "") +
+    ` · generado ${D.generado}`;
+}
+anadir(D.mensajes);
+pintarMeta();
 
 // Filtros
 const estado = {tipo:"todo", q:"", tema:"", orden:"asc"};
@@ -266,11 +306,15 @@ for (const [k, v] of TIPOS) {
   b.onclick = () => { estado.tipo = k; filtros.querySelectorAll("button[data-k]").forEach(x => x.classList.toggle("on", x===b)); aplicar(); };
   filtros.appendChild(b);
 }
-const temas = [...new Set(posts.map(p => p.tm).filter(Boolean))];
-if (temas.length) {
-  const s = document.createElement("select"); s.className = "chip"; s.innerHTML = `<option value="">🗂 Todos los temas</option>` + temas.map(t => `<option>${esc(t)}</option>`).join("");
-  s.onchange = () => { estado.tema = s.value; aplicar(); }; filtros.appendChild(s);
+const selTemas = document.createElement("select"); selTemas.className = "chip"; selTemas.hidden = true;
+selTemas.onchange = () => { estado.tema = selTemas.value; aplicar(); }; filtros.appendChild(selTemas);
+function pintarTemas() {
+  const temas = [...new Set(posts.map(p => p.tm).filter(Boolean))];
+  selTemas.hidden = !temas.length;
+  selTemas.innerHTML = `<option value="">🗂 Todos los temas</option>` + temas.map(t => `<option>${esc(t)}</option>`).join("");
+  selTemas.value = estado.tema;
 }
+pintarTemas();
 const ord = document.createElement("button"); ord.className = "chip"; ord.textContent = "⇅ Más antiguos primero"; ord.style.marginLeft = "auto";
 ord.onclick = () => { estado.orden = estado.orden==="asc"?"desc":"asc"; ord.textContent = estado.orden==="asc"?"⇅ Más antiguos primero":"⇅ Más recientes primero"; aplicar(); };
 filtros.appendChild(ord);
@@ -296,24 +340,29 @@ function tarjeta(p, esCom) {
   if (n) h += `<div class="media ${cls}">${inline.map(medio).join("")}</div>`;
   if (otros.length) h += `<div class="media">${otros.map(medio).join("")}</div>`;
   if (p.t) h += `<div class="texto">${enl(p.t)}</div>`;
-  if (!esCom && p.c && p.c.length) {
-    h += `<details class="com"><summary>💬 ${p.c.length} comentario${p.c.length>1?"s":""}</summary>` +
-      p.c.map(c => tarjeta({f:c.f,t:c.t,i:c.i,items:[c]}, true)).join("") + `</details>`;
+  const cs = esCom ? [] : comentarios(p);
+  if (cs.length) {
+    h += `<details class="com"><summary>💬 ${cs.length} comentario${cs.length>1?"s":""}</summary>` +
+      cs.map(c => tarjeta({f:c.f,t:c.t,i:c.i,items:[c]}, true)).join("") + `</details>`;
   }
   return h + `</article>`;
 }
 let filtrados = [], pos = 0, ultimoDia = "";
 const lista = $("#lista");
+const coincide = p => (estado.tipo === "todo" || p.tipos.has(estado.tipo)) &&
+  (!estado.tema || p.tm === estado.tema) && (!estado.q || busq(p).includes(estado.q));
+function pintarEstado() {
+  const total = 1 + D.partes.length;
+  $("#vacio").style.display = filtrados.length || cargadas < total ? "none" : "block";
+  $("#estado-n").textContent = (filtrados.length === posts.length
+    ? `${posts.length} elementos` : `${filtrados.length} de ${posts.length} elementos`) +
+    (cargadas < total ? ` · cargando ${Math.round(cargadas * 100 / total)}%…` : "");
+}
 function aplicar() {
-  filtrados = posts.filter(p =>
-    (estado.tipo === "todo" || p.tipos.has(estado.tipo)) &&
-    (!estado.tema || p.tm === estado.tema) &&
-    (!estado.q || p.busq.includes(estado.q)));
+  filtrados = posts.filter(coincide);
   if (estado.orden === "desc") filtrados.reverse();
   lista.innerHTML = ""; pos = 0; ultimoDia = "";
-  $("#vacio").style.display = filtrados.length ? "none" : "block";
-  $("#estado-n").textContent = filtrados.length === posts.length
-    ? `${posts.length} elementos` : `${filtrados.length} de ${posts.length} elementos`;
+  pintarEstado();
   mas();
 }
 function mas() {
@@ -325,7 +374,30 @@ function mas() {
   }
   pos += 40; lista.insertAdjacentHTML("beforeend", frag.join(""));
 }
-new IntersectionObserver(e => { if (e[0].isIntersecting && pos < filtrados.length) mas(); }, {rootMargin:"1200px"}).observe($("#centinela"));
+const centinela = $("#centinela");
+new IntersectionObserver(e => { if (e[0].isIntersecting && pos < filtrados.length) mas(); }, {rootMargin:"1200px"}).observe(centinela);
+function rellenar() {  // si el final de la lista está a la vista, pinta más
+  if (pos < filtrados.length && centinela.getBoundingClientRect().top < innerHeight + 1200) mas();
+}
+
+// Resto de partes: se cargan una a una con <script> (funciona también abriendo el archivo con doble clic)
+window.__parte = msgs => {
+  const nuevos = anadir(msgs);
+  cargadas++;
+  if (estado.orden === "asc") { filtrados.push(...nuevos.filter(coincide)); rellenar(); }
+  pintarMeta(); pintarTemas();
+  if (cargadas >= 1 + D.partes.length && (estado.orden === "desc" || estado.q)) aplicar();
+  else pintarEstado();
+  siguienteParte();
+};
+function siguienteParte() {
+  const archivo = D.partes[cargadas - 1];
+  if (!archivo) return;
+  const s = document.createElement("script");
+  s.src = archivo;
+  s.onerror = () => { $("#estado-n").textContent += " · falta " + archivo + " (regenera el HTML)"; };
+  document.body.appendChild(s);
+}
 
 // Visor de imágenes y botón arriba
 const lb = $("#lb");
@@ -336,6 +408,7 @@ const arriba = $("#arriba");
 addEventListener("scroll", () => arriba.classList.toggle("ver", scrollY > 900), {passive:true});
 arriba.onclick = () => scrollTo({top:0, behavior:"smooth"});
 aplicar();
+siguienteParte();
 </script>
 </body>
 </html>

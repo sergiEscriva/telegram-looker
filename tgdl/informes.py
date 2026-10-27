@@ -1,6 +1,7 @@
 """Informes de progreso: el motor emite eventos y cada interfaz (consola / panel web) los muestra."""
 from tqdm import tqdm
 
+from . import registro
 from .utilidades import tamano_legible
 
 
@@ -13,7 +14,7 @@ class Informe:
     def ampliar(self, clave, n=1): ...
     def avance(self, clave, n=1): ...
     def canal_fin(self, clave, stats: dict): ...
-    def archivo_inicio(self, slot, nombre, total): ...
+    def archivo_inicio(self, slot, nombre, total, inicial=0): ...
     def archivo_progreso(self, slot, recibido): ...
     def archivo_fin(self, slot): ...
 
@@ -43,6 +44,7 @@ class InformeConsola(Informe):
         self._libres.sort()
 
     def log(self, texto, nivel="info"):
+        registro.escribir(texto, nivel)
         tqdm.write(f"{self._ICONOS.get(nivel, '')}{texto}")
 
     def fase(self, nombre):
@@ -70,9 +72,10 @@ class InformeConsola(Informe):
             self._soltar(barra)
         tqdm.write(f"✅ {self.titulos.get(clave, clave)}: {resumen_stats(stats)}")
 
-    def archivo_inicio(self, slot, nombre, total):
-        self.slots[slot] = [tqdm(total=total, desc=("  ↳ " + nombre)[:30].ljust(30), unit="B", unit_scale=True,
-                                 unit_divisor=1024, position=self._posicion(), leave=False, dynamic_ncols=True), 0]
+    def archivo_inicio(self, slot, nombre, total, inicial=0):
+        self.slots[slot] = [tqdm(total=total, initial=inicial, desc=("  ↳ " + nombre)[:30].ljust(30), unit="B",
+                                 unit_scale=True, unit_divisor=1024, position=self._posicion(), leave=False,
+                                 dynamic_ncols=True), inicial]
 
     def archivo_progreso(self, slot, recibido):
         if slot in self.slots:

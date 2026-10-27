@@ -445,3 +445,12 @@ details.avanzado { margin-top: 14px; padding-top: 10px; border-top: 1px solid #e
   .comando { padding: 0 6px; }
   .tarea { min-width: 0; }
 }
+
+/* ---- añadidos: selector de carpeta, programadas ---- */
+.con-boton{display:flex;gap:6px}.con-boton .campo{flex:1;min-width:0}
+.programadas{margin-top:18px}
+.programadas h3{margin:0 0 2px}.programadas .sub{margin:0 0 10px;color:#5a6573;font-size:12px}
+.prog-fila{display:flex;align-items:center;gap:10px;padding:8px 10px;margin-bottom:6px;border:1px solid #d5dfe9;border-radius:3px;background:#fff}
+.prog-fila .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prog-fila small{color:#5a6573}
+#programar .btn{margin-top:10px}

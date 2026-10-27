@@ -1,8 +1,15 @@
-"""Gestión de varias cuentas de Telegram (una sesión por cuenta en ./sesiones)."""
+"""Gestión de varias cuentas de Telegram (una sesión por cuenta en ./sesiones).
+
+Las sesiones pueden guardarse sin cifrar (<nombre>.session, el formato normal de Telethon) o
+cifradas con una contraseña (<nombre>.session.enc) si CIFRAR_SESIONES=si en el .env.
+"""
+import getpass
 import re
 
 from telethon import TelegramClient, errors
+from telethon.sessions import SQLiteSession, StringSession
 
+from .cifrado import ContrasenaIncorrecta, cifrar, descifrar
 from .config import BASE, SESIONES, cargar_config
 
 _NOMBRE_VALIDO = re.compile(r"^[\w-]{1,32}$")
@@ -15,9 +22,42 @@ def validar_nombre(nombre: str) -> str:
     return nombre
 
 
+def _activado(valor) -> bool:
+    return str(valor or "").strip().lower() in ("1", "si", "sí", "true", "yes", "s")
+
+
+def hay_sesiones_cifradas() -> bool:
+    return SESIONES.is_dir() and any(SESIONES.glob("*.session.enc"))
+
+
+def pedir_contrasena(interactivo: bool = True):
+    """Pide la contraseña de las sesiones si están (o se quieren) cifradas. None = sin cifrar."""
+    if not (_activado(cargar_config().get("CIFRAR_SESIONES")) or hay_sesiones_cifradas()):
+        return None
+    if not interactivo:
+        raise RuntimeError("Las sesiones están cifradas: hace falta la contraseña.")
+    existente = next(iter(SESIONES.glob("*.session.enc")), None) if SESIONES.is_dir() else None
+    while True:
+        contrasena = getpass.getpass("🔒 Contraseña de las sesiones: ")
+        if not contrasena:
+            continue
+        if existente is None:  # primera vez: se pide dos veces
+            if getpass.getpass("   Repítela: ") != contrasena:
+                print("   No coinciden, prueba otra vez.")
+                continue
+            print("   Guárdala bien: sin ella habrá que volver a iniciar sesión en cada cuenta.")
+            return contrasena
+        try:
+            descifrar(existente.read_bytes(), contrasena)
+            return contrasena
+        except ContrasenaIncorrecta:
+            print("   Contraseña incorrecta.")
+
+
 class GestorCuentas:
-    def __init__(self, api_id: int, api_hash: str):
+    def __init__(self, api_id: int, api_hash: str, contrasena: str = None):
         self.api_id, self.api_hash = api_id, api_hash
+        self.contrasena = contrasena  # si hay contraseña, las sesiones se guardan cifradas
         self.clientes: dict = {}
         self.pendientes: dict = {}  # logins a medias desde el panel web
         self._info: dict = {}
@@ -28,6 +68,32 @@ class GestorCuentas:
                             "version": cfg.get("VERSION_APP") or None}
         SESIONES.mkdir(exist_ok=True)
         self._migrar_sesion_antigua()
+        if self.contrasena:
+            self._cifrar_sesiones_planas()
+
+    def _cifrar_sesiones_planas(self):
+        """Convierte las sesiones sin cifrar en cifradas (y borra las originales)."""
+        for plana in SESIONES.glob("*.session"):
+            nombre = plana.stem
+            sesion = SQLiteSession(str(SESIONES / nombre))
+            try:
+                texto = StringSession.save(sesion)
+            finally:
+                sesion.close()
+            if texto:
+                (SESIONES / f"{nombre}.session.enc").write_bytes(cifrar(texto, self.contrasena))
+            for ext in (".session", ".session-journal"):
+                (SESIONES / f"{nombre}{ext}").unlink(missing_ok=True)
+
+    def _guardar(self, nombre: str, cliente):
+        """Con cifrado, la sesión vive en memoria: se guarda cifrada tras conectar o iniciar sesión."""
+        if self.contrasena and cliente is not None:
+            texto = cliente.session.save()
+            if texto:
+                (SESIONES / f"{nombre}.session.enc").write_bytes(cifrar(texto, self.contrasena))
+
+    def _existe(self, nombre: str) -> bool:
+        return any((SESIONES / f"{nombre}{ext}").exists() for ext in (".session", ".session.enc"))
 
     @staticmethod
     def _migrar_sesion_antigua():
@@ -38,11 +104,19 @@ class GestorCuentas:
 
     def nombres(self) -> list:
         """Cuentas guardadas (sin contar los inicios de sesión a medias del panel)."""
-        return sorted(p.stem for p in SESIONES.glob("*.session") if p.stem not in self.pendientes)
+        nombres = {p.name.split(".", 1)[0] for p in SESIONES.iterdir()
+                   if p.name.endswith((".session", ".session.enc"))}
+        return sorted(n for n in nombres if n not in self.pendientes)
+
+    def _sesion(self, nombre: str):
+        if not self.contrasena:
+            return str(SESIONES / nombre)
+        cifrada = SESIONES / f"{nombre}.session.enc"
+        return StringSession(descifrar(cifrada.read_bytes(), self.contrasena) if cifrada.exists() else None)
 
     def _crear_cliente(self, nombre: str) -> TelegramClient:
         return TelegramClient(
-            str(SESIONES / validar_nombre(nombre)), self.api_id, self.api_hash,
+            self._sesion(validar_nombre(nombre)), self.api_id, self.api_hash,
             flood_sleep_threshold=3600,      # espera sola FloodWaits de hasta 1 h (se avisa en el log)
             connection_retries=10, retry_delay=5, request_retries=10,
             # Lo que aparece en Telegram > Ajustes > Dispositivos (configurable en el .env)
@@ -52,7 +126,7 @@ class GestorCuentas:
         )
 
     def _borrar_archivos(self, nombre: str):
-        for ext in (".session", ".session-journal"):
+        for ext in (".session", ".session-journal", ".session.enc"):
             ruta = SESIONES / f"{nombre}{ext}"
             if ruta.exists():
                 ruta.unlink()
@@ -63,7 +137,7 @@ class GestorCuentas:
             return None
         cliente = self.clientes.get(nombre)
         if cliente is None:
-            if not (SESIONES / f"{validar_nombre(nombre)}.session").exists():
+            if not self._existe(validar_nombre(nombre)):
                 return None
             cliente = self._crear_cliente(nombre)
         if not cliente.is_connected():
@@ -73,6 +147,7 @@ class GestorCuentas:
             self.clientes.pop(nombre, None)
             return None
         self.clientes[nombre] = cliente
+        self._guardar(nombre, cliente)
         return cliente
 
     async def info(self, nombre: str) -> dict:
@@ -93,6 +168,7 @@ class GestorCuentas:
         cliente = self._crear_cliente(nombre)
         await cliente.start()  # pide teléfono, código y contraseña 2FA por consola
         self.clientes[nombre] = cliente
+        self._guardar(nombre, cliente)
         return cliente
 
     # ---- login por pasos (panel web) --------------------------------------
@@ -140,12 +216,13 @@ class GestorCuentas:
             return "password"
         del self.pendientes[nombre]
         self.clientes[nombre] = cliente
+        self._guardar(nombre, cliente)
         return "ok"
 
     async def eliminar(self, nombre: str, cerrar_sesion: bool = True):
         nombre = validar_nombre(nombre)
         await self.cancelar_login(nombre)
-        if not (SESIONES / f"{nombre}.session").exists() and nombre not in self.clientes:
+        if not self._existe(nombre) and nombre not in self.clientes:
             raise ValueError(f"No existe la cuenta '{nombre}'.")
         cliente = self.clientes.pop(nombre, None) or self._crear_cliente(nombre)
         try:
@@ -164,7 +241,11 @@ class GestorCuentas:
                 await self.cancelar_login(nombre)
             except Exception:  # noqa: BLE001
                 pass
-        for cliente in list(self.clientes.values()):
+        for nombre, cliente in list(self.clientes.items()):
+            try:
+                self._guardar(nombre, cliente)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 await cliente.disconnect()
             except Exception:  # noqa: BLE001

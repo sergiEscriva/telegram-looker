@@ -16,9 +16,18 @@ const TOKEN = document.querySelector('meta[name="tgdl-token"]')?.content || "";
 
 async function api(url, opts = {}) {
   const r = await fetch(url, { method: opts.method || "GET", headers: { "Content-Type": "application/json", "X-Token": TOKEN }, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  if (r.status === 403) { caducado(); throw new Error("El panel se ha reiniciado: recargando la página…"); }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || r.statusText);
   return d;
+}
+// Si el panel se reinicia, el token de esta pestaña deja de valer: se recarga para coger el nuevo.
+let recargando = false;
+function caducado() {
+  if (recargando) return;
+  recargando = true;
+  toast("El panel se ha reiniciado. Recargando…");
+  setTimeout(() => location.reload(), 1200);
 }
 function toast(texto, tipo = "") {
   const el = document.createElement("div");
@@ -47,6 +56,7 @@ function ir(vista, { registrar = true } = {}) {
   if (vista === "cuentas") cargarCuentas();
   if (vista === "archivo") cargarArchivo();
   if (vista === "nueva") prepararNueva();
+  if (vista === "panel") cargarProgramadas();
   $("#contenido").scrollTo({ top: 0 });
   restaurarVentana();
 }
@@ -81,7 +91,14 @@ function conectarWS() {
   const ind = $("#conexion");
   ws.onopen = () => { ind.className = "estado-conexion ok"; ind.querySelector("span").textContent = "Conectado"; };
   ws.onmessage = e => renderTrabajos(JSON.parse(e.data).trabajos);
-  ws.onclose = () => { ind.className = "estado-conexion mal"; ind.querySelector("span").textContent = "Reconectando…"; setTimeout(conectarWS, 2000); };
+  ws.onclose = () => {
+    ind.className = "estado-conexion mal"; ind.querySelector("span").textContent = "Reconectando…";
+    // Si el servidor vuelve pero rechaza el token, la página es de una sesión anterior del panel.
+    setTimeout(() => fetch("/api/config", { headers: { "X-Token": TOKEN } })
+      .then(r => { if (r.status === 403) caducado(); else conectarWS();
+cargarProgramadas(); })
+      .catch(() => conectarWS()), 2000);
+  };
 }
 
 /* ------------------------------------------------------------------ panel de trabajos */
@@ -121,6 +138,7 @@ function crearTarjeta(t) {
     <div class="trabajo-cab">
       <span class="insignia"></span><h2></h2>
       <button class="btn mini peligro" data-acc="detener">■ Detener</button>
+      <button class="btn mini" data-acc="repetir" title="Lanza otra vez la misma descarga (solo baja lo nuevo)">↻ Repetir</button>
       <button class="btn mini" data-acc="quitar">Quitar</button>
     </div>
     <div class="trabajo-meta"></div>
@@ -130,6 +148,9 @@ function crearTarjeta(t) {
     <details class="registro"><summary>Más información</summary><div class="consola"></div></details>`;
   $("[data-acc=detener]", el).onclick = async () => {
     try { await api(`/api/trabajos/${t.id}/detener`, { method: "POST" }); toast("Deteniendo la descarga…"); } catch (e) { toast(e.message, "error"); }
+  };
+  $("[data-acc=repetir]", el).onclick = async () => {
+    try { await api(`/api/trabajos/${t.id}/repetir`, { method: "POST" }); toast("🚀 Descarga relanzada", "ok"); } catch (e) { toast(e.message, "error"); }
   };
   $("[data-acc=quitar]", el).onclick = async () => {
     try { await api(`/api/trabajos/${t.id}`, { method: "DELETE" }); el.remove(); tarjetas.delete(t.id); } catch (e) { toast(e.message, "error"); }
@@ -147,6 +168,7 @@ function actualizarTarjeta(el, t) {
   $("h2", el).textContent = t.etiquetas.join(" · ");
   $("[data-acc=detener]", el).hidden = !activo(t);
   $("[data-acc=quitar]", el).hidden = activo(t);
+  $("[data-acc=repetir]", el).hidden = activo(t) || !(t.canales_sel || []).length;
 
   const fin = t.fin || Date.now() / 1000;
   $(".trabajo-meta", el).innerHTML =
@@ -200,7 +222,7 @@ async function obtenerCuentas() {
 async function prepararNueva() {
   try { await obtenerCuentas(); } catch (e) { toast(e.message, "error"); }
   if (!configCargada) {
-    try { const c = await api("/api/config"); $("#op-salida").value = c.salida; $("#op-hilos").value = c.hilos; $("#hilos-val").textContent = c.hilos; configCargada = true; } catch { }
+    try { const c = await api("/api/config"); $("#op-salida").value = c.salida; $("#op-hilos").value = c.hilos; $("#hilos-val").textContent = c.hilos; $("#op-conexiones").value = c.conexiones; $("#conexiones-val").textContent = c.conexiones; configCargada = true; } catch { }
   }
   const conectadas = cuentas.filter(c => c.conectada);
   for (const n of [...cuentasSel]) if (!conectadas.some(c => c.nombre === n)) cuentasSel.delete(n);
@@ -272,6 +294,7 @@ function actualizarResumen() {
   $("#reparto").hidden = cuentasSel.size < 2;
   const ok = cuentasSel.size && seleccion.size && tiposSel.size;
   $("#btn-iniciar").disabled = !ok;
+  $("#btn-programar").disabled = !ok || !diasSel.size;
   $("#resumen-accion").textContent = ok
     ? `${seleccion.size} canal${seleccion.size > 1 ? "es" : ""} · ${cuentasSel.size} cuenta${cuentasSel.size > 1 ? "s" : ""} · ${tiposSel.size === TIPOS.length ? "todo el contenido" : [...tiposSel].join(", ")}${$("#op-seguir").checked ? " · vigilancia" : ""}`
     : "Selecciona al menos una cuenta, un canal y un tipo de contenido.";
@@ -286,11 +309,29 @@ function actualizarResumen() {
   });
 })();
 $("#op-hilos").addEventListener("input", e => $("#hilos-val").textContent = e.target.value);
+$("#op-conexiones").addEventListener("input", e => $("#conexiones-val").textContent = e.target.value);
+$("#btn-examinar").addEventListener("click", async () => {
+  const b = $("#btn-examinar"); b.disabled = true;
+  try { const r = await api("/api/elegir-carpeta", { method: "POST", body: { inicial: $("#op-salida").value } }); if (r.ruta) $("#op-salida").value = r.ruta; }
+  catch (e) { toast(e.message, "error"); } finally { b.disabled = false; }
+});
+
+/* programar */
+const DIAS = ["L", "M", "X", "J", "V", "S", "D"];
+const diasSel = new Set([0, 1, 2, 3, 4, 5, 6]);
+(function pintarDias() {
+  const cont = $("#prog-dias");
+  cont.innerHTML = DIAS.map((d, i) => `<button class="chip on" data-dia="${i}">${d}</button>`).join("");
+  $$("[data-dia]", cont).forEach(b => b.onclick = () => {
+    const i = +b.dataset.dia; diasSel.has(i) ? diasSel.delete(i) : diasSel.add(i);
+    b.classList.toggle("on", diasSel.has(i)); actualizarResumen();
+  });
+})();
 $("#op-seguir").addEventListener("change", actualizarResumen);
 
-$("#btn-iniciar").addEventListener("click", async () => {
+function leerOpciones() {
   const v = id => $(id).value.trim();
-  const opciones = {
+  return {
     tipos: [...tiposSel], seguir: $("#op-seguir").checked, comentarios: $("#op-comentarios").checked,
     albumes: $("#op-albumes").checked, deduplicar: $("#op-deduplicar").checked, html: $("#op-html").checked,
     notificar: $("#op-notificar").checked, desde: v("#op-desde"), hasta: v("#op-hasta"),
@@ -298,7 +339,21 @@ $("#btn-iniciar").addEventListener("click", async () => {
     buscar: v("#op-buscar"), nombres: v("#op-nombres"), hilos: +v("#op-hilos"), limite_velocidad: v("#op-limite"),
     espacio_minimo: v("#op-espacio"), salida: v("#op-salida"),
     reparto: ($("input[name=reparto]:checked") || {}).value || "canal",
+    conexiones: +v("#op-conexiones"), takeout: $("#op-takeout").checked,
   };
+}
+$("#btn-programar").addEventListener("click", async () => {
+  const btn = $("#btn-programar"); btn.disabled = true;
+  try {
+    await api("/api/programadas", { method: "POST", body: { cuentas: [...cuentasSel], canales: [...seleccion.values()], opciones: leerOpciones(), hora: $("#prog-hora").value, dias: [...diasSel] } });
+    toast(`⏰ Programada cada día a las ${$("#prog-hora").value}`, "ok");
+    ir("panel");
+  } catch (e) { toast(e.message, "error"); }
+  finally { actualizarResumen(); }
+});
+
+$("#btn-iniciar").addEventListener("click", async () => {
+  const opciones = leerOpciones();
   const btn = $("#btn-iniciar"); btn.disabled = true;
   try {
     await api("/api/trabajos", { method: "POST", body: { cuentas: [...cuentasSel], canales: [...seleccion.values()], opciones } });
@@ -396,9 +451,16 @@ async function cargarArchivo() {
       <div class="acciones">
         ${c.html ? `<a class="btn mini primario" href="/ver/${c.id}/index.html" target="_blank" rel="noopener">🌐 Abrir archivo</a>` : ""}
         <button class="btn mini" data-html="${c.id}">↻ ${c.html ? "Regenerar" : "Generar"} HTML</button>
+        <button class="btn mini" data-exportar="${c.id}" data-formato="csv" title="Tabla para Excel con texto, fecha, enlaces y vistas">📊 CSV</button>
+        <button class="btn mini" data-exportar="${c.id}" data-formato="json">{ } JSON</button>
       </div>
       <div class="ruta">📂 ${esc(c.carpeta)}</div>
     </div>`).join("");
+  $$("[data-exportar]", cont).forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { const r = await api(`/api/archivo/${b.dataset.exportar}/exportar`, { method: "POST", body: { formato: b.dataset.formato } }); toast(`Exportado: ${r.ruta}`, "ok"); }
+    catch (e) { toast(e.message, "error"); } finally { b.disabled = false; }
+  });
   $$("[data-html]", cont).forEach(b => b.onclick = async () => {
     b.disabled = true;
     try { await api(`/api/archivo/${b.dataset.html}/html`, { method: "POST" }); toast("HTML actualizado", "ok"); cargarArchivo(); }
@@ -406,6 +468,22 @@ async function cargarArchivo() {
   });
 }
 
+/* ------------------------------------------------------------------ programadas */
+async function cargarProgramadas() {
+  let lista = [];
+  try { lista = await api("/api/programadas"); } catch { return; }
+  $("#bloque-programadas").hidden = !lista.length;
+  $("#lista-programadas").innerHTML = lista.map(p => `
+    <div class="prog-fila"><span>⏰ <b>${esc(p.hora)}</b></span>
+      <span class="nm">${esc(p.canales.map(c => c.nombre).join(" · "))} <small>[${esc(p.cuentas.join(", "))}]</small></span>
+      <small>${p.dias.length === 7 ? "todos los días" : p.dias.map(d => DIAS[d]).join(" ")}${p.ultima ? " · última: " + esc(p.ultima) : ""}</small>
+      <button class="btn mini peligro" data-borrar-prog="${esc(p.id)}">Quitar</button></div>`).join("");
+  $$("[data-borrar-prog]", $("#lista-programadas")).forEach(b => b.onclick = async () => {
+    try { await api(`/api/programadas/${b.dataset.borrarProg}`, { method: "DELETE" }); cargarProgramadas(); } catch (e) { toast(e.message, "error"); }
+  });
+}
+
 /* ------------------------------------------------------------------ inicio */
 conectarWS();
+cargarProgramadas();
 obtenerCuentas().then(c => { if (!c.length) { ir("cuentas"); toast("👋 Empieza añadiendo tu cuenta de Telegram"); } }).catch(() => { });

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS mensajes (
     post_id    INTEGER,            -- si es un comentario: publicación del canal a la que responde
     cuenta     TEXT,
     actualizado TEXT,
+    vistas     INTEGER,            -- visualizaciones de la publicación (si Telegram las da)
     PRIMARY KEY (canal_id, msg_id)
 );
 CREATE INDEX IF NOT EXISTS idx_mensajes_origen ON mensajes (origen, fecha);
@@ -47,6 +48,11 @@ CREATE TABLE IF NOT EXISTS hilos (
     post_id   INTEGER,
     ultimo_id INTEGER,
     PRIMARY KEY (canal_id, post_id)
+);
+CREATE TABLE IF NOT EXISTS programadas (
+    id       TEXT PRIMARY KEY,     -- descargas que el panel lanza solo a una hora fija
+    datos    TEXT NOT NULL,        -- JSON: cuentas, canales, opciones, hora "HH:MM" y días (0 = lunes)
+    ultima   TEXT                  -- fecha local (AAAA-MM-DD) de la última vez que se lanzó
 );
 CREATE TABLE IF NOT EXISTS trabajos (
     id    TEXT PRIMARY KEY,        -- historial de descargas del panel web
@@ -70,8 +76,15 @@ class BD:
         self.con.execute("PRAGMA journal_mode=WAL")
         self.con.execute("PRAGMA synchronous=NORMAL")
         self.con.executescript(_ESQUEMA)
+        self._migrar()
         self.con.commit()
         self._sin_confirmar, self._ultimo_commit = 0, time.monotonic()
+
+    def _migrar(self):
+        """Añade a bases de datos de versiones anteriores las columnas nuevas."""
+        columnas = {f[1] for f in self.con.execute("PRAGMA table_info(mensajes)")}
+        if "vistas" not in columnas:
+            self.con.execute("ALTER TABLE mensajes ADD COLUMN vistas INTEGER")
 
     def confirmar(self):
         """Guarda en disco las escrituras pendientes."""
@@ -92,11 +105,12 @@ class BD:
         return {f[0] for f in filas}
 
     def guardar_mensaje(self, canal_id, msg_id, estado, *, origen=None, tipo=None, ruta=None, tamano=None,
-                        fecha=None, texto=None, album=None, tema=None, post_id=None, cuenta=None):
+                        fecha=None, texto=None, album=None, tema=None, post_id=None, cuenta=None, vistas=None):
         self.con.execute(
             "INSERT OR REPLACE INTO mensajes (canal_id, msg_id, origen, estado, tipo, ruta, tamano, fecha, texto,"
-            " album, tema, post_id, cuenta, actualizado) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (canal_id, msg_id, origen, estado, tipo, ruta, tamano, fecha, texto, album, tema, post_id, cuenta, _ahora()))
+            " album, tema, post_id, cuenta, actualizado, vistas) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (canal_id, msg_id, origen, estado, tipo, ruta, tamano, fecha, texto, album, tema, post_id, cuenta, _ahora(),
+             vistas))
         self._escrito()
 
     def mensajes_de(self, origen: int):
@@ -153,6 +167,22 @@ class BD:
 
     def borrar_trabajo(self, trabajo_id):
         self.con.execute("DELETE FROM trabajos WHERE id=?", (trabajo_id,))
+        self.con.commit()
+
+    # ---- descargas programadas --------------------------------------------
+    def guardar_programada(self, prog_id, datos: str, ultima=None):
+        self.con.execute("INSERT OR REPLACE INTO programadas VALUES (?,?,?)", (prog_id, datos, ultima))
+        self.con.commit()
+
+    def programadas(self):
+        return self.con.execute("SELECT * FROM programadas ORDER BY id").fetchall()
+
+    def marcar_programada(self, prog_id, ultima: str):
+        self.con.execute("UPDATE programadas SET ultima=? WHERE id=?", (ultima, prog_id))
+        self.con.commit()
+
+    def borrar_programada(self, prog_id):
+        self.con.execute("DELETE FROM programadas WHERE id=?", (prog_id,))
         self.con.commit()
 
     def cerrar(self):

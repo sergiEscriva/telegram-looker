@@ -23,8 +23,20 @@ Descargador automatico masivo para canales y grupos de Telegram (fotos, videos, 
   - Filtros rapidos por tipo (Fotos, Videos, Audios, Documentos, Texto).
   - Visor de fotos a pantalla completa estilo *Galeria fotografica de Windows*.
   - 100% autonomo (no requiere conexion a internet para ver el contenido guardado).
-- **Deduplicacion inteligente (SHA-256):**
-  - Si un archivo ya fue descargado previamente (incluso en otro canal), no se vuelve a descargar: se vincula automaticamente ahorrando ancho de banda y espacio en disco.
+  - En canales grandes los mensajes se guardan por partes (`archivo_datos/`) y la pagina abre al instante aunque haya cientos de miles.
+- **Deduplicacion inteligente:**
+  - Si un archivo de Telegram ya fue descargado previamente (incluso en otro canal), no se vuelve a descargar: se vincula automaticamente ahorrando ancho de banda y espacio en disco.
+- **Descargas rapidas y reanudables:**
+  - Los archivos de 4 MB o mas se bajan por trozos, varios a la vez (`--conexiones`, por defecto 4).
+  - Si se corta (Detener, sin conexion, apagar el PC), la siguiente vez sigue donde se quedo en vez de empezar de cero.
+  - Modo exportacion de Telegram (`--takeout`) para historiales enormes, con menos esperas por FloodWait. La primera vez Telegram pide confirmarlo en la app.
+- **Comodidades del panel:**
+  - Boton **Repetir** en cada descarga terminada (relanza lo mismo y solo baja lo nuevo).
+  - **Descargas programadas**: cada dia (o los dias que elijas) a una hora fija, mientras el panel este abierto.
+  - Boton **Examinar...** para elegir la carpeta de destino.
+  - Exportar los mensajes de un canal a **CSV** (para Excel) o **JSON**: texto, fecha, enlaces, archivo y vistas.
+  - Historial de descargas que se conserva al reiniciar.
+- **Registro en archivo:** todo lo que sale en pantalla se guarda tambien en `registro.log` (rota solo, maximo ~8 MB).
 - **Organizacion automatica:**
   - Carpetas categorizadas (`fotos/`, `videos/`, `audios/`, `documentos/`, `stickers/`).
   - Albumes agrupados en subcarpetas propias con fecha.
@@ -144,6 +156,9 @@ iniciar.bat
 | `--sin-albumes` | Guarda todas las fotos juntas sin subcarpetas de album |
 | `--sin-html` | No genera el archivo interactivo `index.html` |
 | `--sin-notificar` | No envia mensaje de aviso a Telegram al finalizar |
+| `--conexiones 4` | Trozos que se piden a la vez de cada archivo grande (1-8) |
+| `--takeout` | Modo exportacion de Telegram (menos esperas en historiales enormes) |
+| `--exportar csv\|json` | Solo exporta a CSV/JSON los mensajes ya descargados de los canales indicados |
 
 ---
 
@@ -173,12 +188,20 @@ datos.db                        # Base de datos local de control y reanudacion
 ## Privacidad y seguridad
 
 - Las sesiones de Telegram (`sesiones/*.session`) y las credenciales del archivo `.env` contienen tus claves de acceso privadas. **Nunca las subas a repositorios publicos ni las compartas**.
-- Los archivos `.session` no estan cifrados: cualquiera que copie la carpeta `sesiones/` puede usar tu cuenta sin pedir codigo. Guardala en un disco de confianza y, si sospechas que se ha copiado, cierra esas sesiones desde Telegram (Ajustes > Dispositivos).
+- Por defecto los archivos `.session` no estan cifrados: cualquiera que copie la carpeta `sesiones/` puede usar tu cuenta sin pedir codigo. Para protegerlos pon `CIFRAR_SESIONES=si` en el `.env`: al arrancar se pide una contrasena, las sesiones existentes se convierten a `.session.enc` (cifradas con AES-256 y una clave derivada con scrypt) y las originales se borran. Si olvidas la contrasena, borra los `.session.enc` y vuelve a iniciar sesion en cada cuenta.
+- Si sospechas que alguien ha copiado una sesion, cierrala desde Telegram (Ajustes > Dispositivos).
 - El panel solo escucha en `127.0.0.1` y acepta peticiones que vengan de su propia pagina: cada arranque genera un token secreto, y se rechazan otros origenes y otros nombres de host. Asi otra web abierta en el navegador no puede lanzar descargas ni leer tus datos. Si recargas el panel tras reiniciarlo, el token se renueva solo.
 - Los archivos descargados se abren desde el panel aislados (`sandbox`): un `.html` o `.svg` de un canal se entrega como descarga y no puede usar el panel.
 - El archivo `.gitignore` incluido ya viene preconfigurado para ignorar `.env`, la carpeta `sesiones/`, `descargas/` y `datos.db`.
 - En Telegram > Ajustes > Dispositivos cada sesion aparece con el nombre de la app que creaste en my.telegram.org y el modelo "PC". Puedes cambiar el modelo, el sistema y la version con `NOMBRE_DISPOSITIVO`, `SISTEMA_DISPOSITIVO` y `VERSION_APP` en el `.env` (ver `.env.ejemplo`).
 - Utiliza la herramienta respetando los terminos de servicio de Telegram y para contenido al que tengas derecho legitimo de acceso.
+
+---
+
+## Version .exe (sin instalar Python)
+
+Ejecuta `construir_exe.bat`: crea `dist\telegram-looker-panel.exe` y `dist\telegram-looker-consola.exe`. Copialos a una carpeta con tu `.env`; las sesiones, `datos.db` y las descargas se guardan junto al `.exe`.
+Tambien puedes descargarlos ya hechos desde GitHub: pestana *Actions* > *Ejecutables Windows* > *Run workflow*, y al terminar el artefacto `telegram-looker-windows`.
 
 ---
 

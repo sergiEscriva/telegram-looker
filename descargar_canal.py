@@ -27,7 +27,8 @@ try:
     from telethon import errors, utils
 
     from tgdl.config import RUTA_BD, SALIDA_POR_DEFECTO, cargar_config, entero, obtener_credenciales
-    from tgdl.cuentas import GestorCuentas, validar_nombre
+    from tgdl.cuentas import GestorCuentas, pedir_contrasena, validar_nombre
+    from tgdl.exportar import exportar
     from tgdl.html_export import generar_html
     from tgdl.informes import InformeConsola
     from tgdl.motor import Opciones, ejecutar, listar_dialogos, resolver
@@ -64,6 +65,10 @@ def parsear_args(cfg: dict):
     g.add_argument("--sin-notificar", action="store_true", help="No enviar aviso a Mensajes guardados al terminar.")
     g.add_argument("--limite-velocidad", default="", metavar="TAM", help="Velocidad máxima total, p. ej. 5MB (por segundo).")
     g.add_argument("--espacio-minimo", default="1GB", metavar="TAM", help="Se detiene si quedan menos de esto libres (def. 1GB).")
+    g.add_argument("--conexiones", type=int, default=entero(cfg, "CONEXIONES", 4), metavar="N",
+                   help="Trozos que se piden a la vez de cada archivo grande (1-8, def. 4).")
+    g.add_argument("--takeout", action="store_true",
+                   help="Modo exportación de Telegram: menos esperas en historiales enormes (pide confirmar en la app).")
 
     g = p.add_argument_group("filtros")
     g.add_argument("-t", "--tipos", default=",".join(TIPOS), help=f"Tipos: {','.join(TIPOS)} (def. todos).")
@@ -78,6 +83,7 @@ def parsear_args(cfg: dict):
     g = p.add_argument_group("otros")
     g.add_argument("-l", "--listar", action="store_true", help="Lista tus canales/grupos y sale.")
     g.add_argument("--regenerar-html", action="store_true", help="Solo regenera el HTML de los canales indicados.")
+    g.add_argument("--exportar", choices=("csv", "json"), help="Solo exporta los mensajes ya descargados a CSV o JSON.")
     return p.parse_args()
 
 
@@ -114,7 +120,7 @@ async def main():
     cfg = cargar_config()
     args = parsear_args(cfg)
     api_id, api_hash = obtener_credenciales()
-    gestor = GestorCuentas(api_id, api_hash)
+    gestor = GestorCuentas(api_id, api_hash, pedir_contrasena())
     try:
         # --- gestión de cuentas ---
         if args.anadir_cuenta:
@@ -155,12 +161,15 @@ async def main():
 
         objetivos = args.canales or ([cfg["CANAL"]] if cfg.get("CANAL") else []) or await elegir_canales(principal)
 
-        if args.regenerar_html:
+        if args.regenerar_html or args.exportar:
             bd = BD(RUTA_BD)
             try:
                 for obj in objetivos:
-                    ent = await resolver(principal, obj)
-                    print(f"🌐 {generar_html(bd, utils.get_peer_id(ent))}")
+                    canal_id = utils.get_peer_id(await resolver(principal, obj))
+                    if args.regenerar_html:
+                        print(f"🌐 {generar_html(bd, canal_id)}")
+                    if args.exportar:
+                        print(f"📊 {exportar(bd, canal_id, args.exportar)}")
             finally:
                 bd.cerrar()
             return
@@ -172,7 +181,7 @@ async def main():
             "albumes": not args.sin_albumes, "nombres": args.nombres, "comentarios": args.comentarios,
             "seguir": args.seguir, "html": not args.sin_html, "deduplicar": not args.sin_deduplicar,
             "notificar": not args.sin_notificar, "limite_velocidad": args.limite_velocidad,
-            "espacio_minimo": args.espacio_minimo,
+            "espacio_minimo": args.espacio_minimo, "conexiones": args.conexiones, "takeout": args.takeout,
         })
         if len(clientes) > 1:
             modo = "repartiéndose los mensajes" if opc.reparto == "mensajes" else "un canal por cuenta"
