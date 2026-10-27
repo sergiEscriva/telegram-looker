@@ -32,7 +32,8 @@ class GestorCuentas:
             antigua.rename(nueva)
 
     def nombres(self) -> list:
-        return sorted(p.stem for p in SESIONES.glob("*.session"))
+        """Cuentas guardadas (sin contar los inicios de sesión a medias del panel)."""
+        return sorted(p.stem for p in SESIONES.glob("*.session") if p.stem not in self.pendientes)
 
     def _crear_cliente(self, nombre: str) -> TelegramClient:
         return TelegramClient(
@@ -40,10 +41,19 @@ class GestorCuentas:
             flood_sleep_threshold=3600,      # espera sola FloodWaits de hasta 1 h (se avisa en el log)
             connection_retries=10, retry_delay=5, request_retries=10,
             device_model="TG Downloader", app_version="2.0",
+            base_logger=f"tgdl.cuenta.{nombre}",  # permite saber de qué cuenta es cada aviso
         )
+
+    def _borrar_archivos(self, nombre: str):
+        for ext in (".session", ".session-journal"):
+            ruta = SESIONES / f"{nombre}{ext}"
+            if ruta.exists():
+                ruta.unlink()
 
     async def conectar(self, nombre: str):
         """Devuelve el cliente conectado y autorizado, o None si la sesión no es válida."""
+        if nombre in self.pendientes:  # su sesión la tiene abierta el login en curso
+            return None
         cliente = self.clientes.get(nombre)
         if cliente is None:
             if not (SESIONES / f"{validar_nombre(nombre)}.session").exists():
@@ -81,15 +91,36 @@ class GestorCuentas:
     # ---- login por pasos (panel web) --------------------------------------
     async def enviar_codigo(self, nombre: str, telefono: str):
         nombre = validar_nombre(nombre)
+        await self.cancelar_login(nombre)  # un intento anterior sin terminar
         if nombre in self.nombres() and await self.conectar(nombre):
             raise ValueError(f"La cuenta '{nombre}' ya existe y está conectada.")
-        cliente = self._crear_cliente(nombre)
-        await cliente.connect()
-        r = await cliente.send_code_request(telefono)
+        cliente = self.clientes.pop(nombre, None) or self._crear_cliente(nombre)
+        try:
+            if not cliente.is_connected():
+                await cliente.connect()
+            r = await cliente.send_code_request(telefono)
+        except BaseException:
+            await cliente.disconnect()
+            raise
         self.pendientes[nombre] = (cliente, telefono, r.phone_code_hash)
+
+    async def cancelar_login(self, nombre: str):
+        """Abandona un inicio de sesión a medias y borra su sesión sin autorizar."""
+        pendiente = self.pendientes.pop(validar_nombre(nombre), None)
+        if pendiente is None:
+            return
+        cliente = pendiente[0]
+        try:
+            autorizado = cliente.is_connected() and await cliente.is_user_authorized()
+        except Exception:  # noqa: BLE001
+            autorizado = False
+        await cliente.disconnect()
+        if not autorizado:
+            self._borrar_archivos(nombre)
 
     async def verificar(self, nombre: str, codigo: str = None, password: str = None) -> str:
         """Devuelve 'ok' o 'password' (si la cuenta tiene verificación en dos pasos)."""
+        nombre = validar_nombre(nombre)
         if nombre not in self.pendientes:
             raise ValueError("Primero solicita el código.")
         cliente, telefono, hash_codigo = self.pendientes[nombre]
@@ -106,6 +137,9 @@ class GestorCuentas:
 
     async def eliminar(self, nombre: str, cerrar_sesion: bool = True):
         nombre = validar_nombre(nombre)
+        await self.cancelar_login(nombre)
+        if not (SESIONES / f"{nombre}.session").exists() and nombre not in self.clientes:
+            raise ValueError(f"No existe la cuenta '{nombre}'.")
         cliente = self.clientes.pop(nombre, None) or self._crear_cliente(nombre)
         try:
             if not cliente.is_connected():
@@ -115,13 +149,15 @@ class GestorCuentas:
         finally:
             await cliente.disconnect()
         self._info.pop(nombre, None)
-        for ext in (".session", ".session-journal"):
-            ruta = SESIONES / f"{nombre}{ext}"
-            if ruta.exists():
-                ruta.unlink()
+        self._borrar_archivos(nombre)
 
     async def cerrar(self):
-        for cliente in list(self.clientes.values()) + [p[0] for p in self.pendientes.values()]:
+        for nombre in list(self.pendientes):
+            try:
+                await self.cancelar_login(nombre)
+            except Exception:  # noqa: BLE001
+                pass
+        for cliente in list(self.clientes.values()):
             try:
                 await cliente.disconnect()
             except Exception:  # noqa: BLE001

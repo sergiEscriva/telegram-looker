@@ -1,6 +1,7 @@
 """Panel web local (http://127.0.0.1:8765): cuentas, nuevas descargas, progreso en vivo y archivo."""
 import asyncio
 import json
+import secrets
 import sys
 import time
 import uuid
@@ -12,14 +13,20 @@ from aiohttp import WSMsgType, web
 from telethon import errors
 
 from .bd import BD
-from .config import RUTA_BD, SALIDA_POR_DEFECTO, cargar_config, obtener_credenciales
+from .config import RUTA_BD, SALIDA_POR_DEFECTO, cargar_config, entero, obtener_credenciales
 from .cuentas import GestorCuentas
-from .html_export import generar_html
+from .html_export import generar_html_async
 from .informes import Informe
 from .motor import Opciones, ejecutar, listar_dialogos
 from .utilidades import tamano_legible
 
 ESTATICO = Path(__file__).resolve().parent / "estatico"
+ESPERA_DETENER = 30  # segundos para terminar ordenadamente antes de cancelar a la fuerza
+
+# Archivos descargados que el navegador puede mostrar sin riesgo. Cualquier otro tipo (html, svg,
+# xml...) podría ejecutar código, así que se entrega como descarga.
+_EN_LINEA = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "mp4", "webm", "mov", "mkv", "m4v",
+             "mp3", "ogg", "oga", "opus", "m4a", "wav", "flac", "pdf", "txt"}
 
 
 # --------------------------------------------------------------------------- #
@@ -102,6 +109,22 @@ class Trabajo:
         }
 
 
+class TrabajoGuardado:
+    """Trabajo terminado en una sesión anterior del panel (solo se muestra)."""
+
+    def __init__(self, datos: dict):
+        self.datos = datos
+        self.id, self.cuentas = datos["id"], datos.get("cuentas", [])
+        self.estado = datos.get("estado", "terminado")
+        self.tarea = None
+
+    def medir(self):
+        pass
+
+    def foto(self) -> dict:
+        return self.datos
+
+
 # --------------------------------------------------------------------------- #
 # Panel
 # --------------------------------------------------------------------------- #
@@ -111,6 +134,23 @@ class Panel:
         self.bd = BD(RUTA_BD)
         self.trabajos: dict = {}
         self.sockets: set = set()
+        self.token = secrets.token_urlsafe(24)  # se pide en /api y /ws: otras webs no lo conocen
+        self.puerto = None
+        self._ultimo_envio = None
+        for fila in reversed(self.bd.trabajos_guardados()):
+            try:
+                t = TrabajoGuardado(json.loads(fila["datos"]))
+            except (ValueError, KeyError):
+                continue
+            self.trabajos[t.id] = t
+
+    def origenes(self) -> set:
+        return {f"127.0.0.1:{self.puerto}", f"localhost:{self.puerto}"}
+
+    async def indice(self, request):
+        html = (ESTATICO / "index.html").read_text(encoding="utf-8")
+        html = html.replace("</head>", f'<meta name="tgdl-token" content="{self.token}">\n</head>', 1)
+        return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
 
     # ---- cuentas -----------------------------------------------------------
     async def api_cuentas(self, request):
@@ -129,9 +169,15 @@ class Panel:
 
     async def api_verificar(self, request):
         d = await request.json()
-        r = await self.cuentas.verificar(d.get("nombre", ""), d.get("codigo") or None, d.get("password") or None)
-        info = await self.cuentas.info(d["nombre"]) if r == "ok" else None
+        nombre = str(d.get("nombre") or "").strip()
+        r = await self.cuentas.verificar(nombre, d.get("codigo") or None, d.get("password") or None)
+        info = await self.cuentas.info(nombre) if r == "ok" else None
         return web.json_response({"resultado": r, "cuenta": info})
+
+    async def api_cancelar_login(self, request):
+        d = await request.json()
+        await self.cuentas.cancelar_login(str(d.get("nombre") or "").strip())
+        return web.json_response({"ok": True})
 
     async def api_eliminar_cuenta(self, request):
         nombre = request.match_info["nombre"]
@@ -192,13 +238,20 @@ class Panel:
             t.informe.log(t.error, "error")
         finally:
             t.fin = time.time()
+            try:
+                self.bd.guardar_trabajo(t.id, json.dumps(t.foto()), t.fin)
+            except Exception:  # noqa: BLE001
+                pass
 
     async def api_detener(self, request):
         t = self.trabajos.get(request.match_info["id"])
-        if t and t.tarea and not t.tarea.done():
+        if t and t.tarea and not t.tarea.done() and not t.detener.is_set():
+            # Primero se pide parar con calma (se borran los archivos a medias, se guarda el progreso
+            # y se genera el HTML); si no termina a tiempo, se cancela.
             t.detener.set()
             t.informe.log("Deteniendo...", "aviso")
-            t.tarea.cancel()
+            asyncio.get_running_loop().call_later(
+                ESPERA_DETENER, lambda: None if t.tarea.done() else t.tarea.cancel())
         return web.json_response({"ok": True})
 
     async def api_quitar(self, request):
@@ -206,6 +259,7 @@ class Panel:
         if t and t.tarea and not t.tarea.done():
             raise ValueError("Detén la descarga antes de quitarla.")
         self.trabajos.pop(request.match_info["id"], None)
+        self.bd.borrar_trabajo(request.match_info["id"])
         return web.json_response({"ok": True})
 
     # ---- archivo -----------------------------------------------------------
@@ -221,7 +275,7 @@ class Panel:
         return web.json_response(res)
 
     async def api_regenerar(self, request):
-        ruta = generar_html(self.bd, int(request.match_info["canal_id"]))
+        ruta = await generar_html_async(self.bd, int(request.match_info["canal_id"]))
         return web.json_response({"ok": True, "ruta": str(ruta)})
 
     async def ver(self, request):
@@ -233,12 +287,24 @@ class Panel:
         permitidas = [Path(c["carpeta"]).resolve() for c in self.bd.canales()]
         if not ruta.is_file() or not any(ruta.is_relative_to(p) for p in permitidas):
             raise web.HTTPNotFound()
-        return web.FileResponse(ruta)
+        # Todo lo de /ver/ viene de canales de terceros: se aísla del panel con "sandbox" para que
+        # ningún archivo pueda usar la API aunque contenga código.
+        cabeceras = {"X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
+        ext = ruta.suffix.lower().lstrip(".")
+        if ruta == base / "index.html":
+            cabeceras["Content-Security-Policy"] = "sandbox allow-scripts allow-popups allow-downloads"
+        elif ext in _EN_LINEA:
+            if ext != "pdf":  # el visor de PDF del navegador no funciona dentro de un sandbox
+                cabeceras["Content-Security-Policy"] = "sandbox"
+        else:
+            cabeceras["Content-Security-Policy"] = "sandbox"
+            cabeceras["Content-Disposition"] = "attachment"
+        return web.FileResponse(ruta, headers=cabeceras)
 
     async def api_config(self, request):
         cfg = cargar_config()
-        return web.json_response({"salida": cfg.get("CARPETA_DESTINO", str(SALIDA_POR_DEFECTO)),
-                                  "hilos": int(cfg.get("HILOS", 3))})
+        return web.json_response({"salida": cfg.get("CARPETA_DESTINO") or str(SALIDA_POR_DEFECTO),
+                                  "hilos": entero(cfg, "HILOS", 3)})
 
     # ---- tiempo real -------------------------------------------------------
     async def ws(self, request):
@@ -254,19 +320,26 @@ class Panel:
             self.sockets.discard(sock)
         return sock
 
+    async def _enviar(self, sock, datos):
+        try:
+            await asyncio.wait_for(sock.send_str(datos), 5)
+        except Exception:  # noqa: BLE001 - un navegador lento o cerrado no debe frenar a los demás
+            self.sockets.discard(sock)
+
     async def difundir(self):
         while True:
             await asyncio.sleep(0.8)
+            self.bd.confirmar()
             for t in self.trabajos.values():
                 t.medir()
             if not self.sockets:
+                self._ultimo_envio = None
                 continue
             datos = json.dumps({"trabajos": [t.foto() for t in self.trabajos.values()]})
-            for s in list(self.sockets):
-                try:
-                    await s.send_str(datos)
-                except Exception:  # noqa: BLE001
-                    self.sockets.discard(s)
+            if datos == self._ultimo_envio:  # nada ha cambiado
+                continue
+            self._ultimo_envio = datos
+            await asyncio.gather(*(self._enviar(s, datos) for s in list(self.sockets)))
 
     async def cerrar(self):
         for t in self.trabajos.values():
@@ -276,6 +349,30 @@ class Panel:
         await asyncio.gather(*(t.tarea for t in self.trabajos.values() if t.tarea), return_exceptions=True)
         await self.cuentas.cerrar()
         self.bd.cerrar()
+
+
+def seguridad(panel: Panel):
+    """Bloquea las peticiones que no vienen del propio panel.
+
+    - Host: solo 127.0.0.1/localhost con nuestro puerto (evita el "DNS rebinding").
+    - /api y /ws: exigen el token del panel y, si el navegador manda Origin, que sea el nuestro.
+      Así otra web abierta en el navegador no puede lanzar descargas ni leer nada.
+    """
+
+    @web.middleware
+    async def middleware(request, handler):
+        if request.host not in panel.origenes():
+            raise web.HTTPForbidden(text="Host no permitido")
+        if request.path.startswith(("/api/", "/ws")):
+            origen = request.headers.get("Origin")
+            if origen is not None and origen not in {f"http://{h}" for h in panel.origenes()}:
+                raise web.HTTPForbidden(text="Origen no permitido")
+            token = request.headers.get("X-Token") or request.query.get("token", "")
+            if not secrets.compare_digest(token, panel.token):
+                raise web.HTTPForbidden(text="Token no válido: recarga la página del panel")
+        return await handler(request)
+
+    return middleware
 
 
 @web.middleware
@@ -292,20 +389,17 @@ async def errores_json(request, handler):
         return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
 
 
-async def indice(request):
-    return web.FileResponse(ESTATICO / "index.html")
-
-
 def crear_app(panel: Panel) -> web.Application:
-    app = web.Application(middlewares=[errores_json])
+    app = web.Application(middlewares=[seguridad(panel), errores_json])
     r = app.router
-    r.add_get("/", indice)
+    r.add_get("/", panel.indice)
     r.add_static("/estatico/", ESTATICO)
     r.add_get("/ws", panel.ws)
     r.add_get("/api/config", panel.api_config)
     r.add_get("/api/cuentas", panel.api_cuentas)
     r.add_post("/api/cuentas/codigo", panel.api_codigo)
     r.add_post("/api/cuentas/verificar", panel.api_verificar)
+    r.add_post("/api/cuentas/cancelar", panel.api_cancelar_login)
     r.add_delete("/api/cuentas/{nombre}", panel.api_eliminar_cuenta)
     r.add_get("/api/cuentas/{nombre}/canales", panel.api_canales)
     r.add_get("/api/trabajos", panel.api_trabajos)
@@ -325,7 +419,7 @@ async def _servir(api_id, api_hash, puerto):
     for p in range(puerto, puerto + 20):
         try:
             await web.TCPSite(runner, "127.0.0.1", p).start()
-            puerto = p
+            puerto = panel.puerto = p
             break
         except OSError:
             continue
@@ -350,7 +444,7 @@ def main():
         except (AttributeError, ValueError):
             pass
     api_id, api_hash = obtener_credenciales()
-    puerto = int(cargar_config().get("PUERTO_PANEL", 8765))
+    puerto = entero(cargar_config(), "PUERTO_PANEL", 8765)
     try:
         asyncio.run(_servir(api_id, api_hash, puerto))
     except KeyboardInterrupt:

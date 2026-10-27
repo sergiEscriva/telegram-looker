@@ -140,7 +140,7 @@ iniciar.bat
 | `-o`, `--salida` | Carpeta de descarga personalizada |
 | `--limite-velocidad 5MB` | Limite de ancho de banda maximo por segundo |
 | `--espacio-minimo 2GB` | Detiene las descargas si el disco baja de este espacio libre |
-| `--sin-deduplicar` | Desactiva el calculo de hashes SHA-256 para omitir duplicados |
+| `--sin-deduplicar` | Descarga aunque el mismo archivo de Telegram ya se haya bajado en otro canal |
 | `--sin-albumes` | Guarda todas las fotos juntas sin subcarpetas de album |
 | `--sin-html` | No genera el archivo interactivo `index.html` |
 | `--sin-notificar` | No envia mensaje de aviso a Telegram al finalizar |
@@ -151,7 +151,7 @@ iniciar.bat
 
 ```
 descargas/
-└── <Nombre_Del_Canal>/
+└── <Nombre_Del_Canal> [<id>]/   # el id evita mezclar canales con el mismo nombre
     ├── fotos/                  # Fotos sueltas
     ├── videos/                 # Videos y clips
     ├── audios/                 # Mensajes de voz y pistas de audio
@@ -163,7 +163,7 @@ descargas/
     └── index.html              # Archivo navegable sin conexion estilo Vista
 
 sesiones/
-└── <nombre>.session            # Sesiones cifradas de Telegram (no compartirlas)
+└── <nombre>.session            # Sesiones de Telegram SIN cifrar (dan acceso total a la cuenta)
 
 datos.db                        # Base de datos local de control y reanudacion
 ```
@@ -173,5 +173,21 @@ datos.db                        # Base de datos local de control y reanudacion
 ## Privacidad y seguridad
 
 - Las sesiones de Telegram (`sesiones/*.session`) y las credenciales del archivo `.env` contienen tus claves de acceso privadas. **Nunca las subas a repositorios publicos ni las compartas**.
+- Los archivos `.session` no estan cifrados: cualquiera que copie la carpeta `sesiones/` puede usar tu cuenta sin pedir codigo. Guardala en un disco de confianza y, si sospechas que se ha copiado, cierra esas sesiones desde Telegram (Ajustes > Dispositivos).
+- El panel solo escucha en `127.0.0.1` y acepta peticiones que vengan de su propia pagina: cada arranque genera un token secreto, y se rechazan otros origenes y otros nombres de host. Asi otra web abierta en el navegador no puede lanzar descargas ni leer tus datos. Si recargas el panel tras reiniciarlo, el token se renueva solo.
+- Los archivos descargados se abren desde el panel aislados (`sandbox`): un `.html` o `.svg` de un canal se entrega como descarga y no puede usar el panel.
 - El archivo `.gitignore` incluido ya viene preconfigurado para ignorar `.env`, la carpeta `sesiones/`, `descargas/` y `datos.db`.
 - Utiliza la herramienta respetando los terminos de servicio de Telegram y para contenido al que tengas derecho legitimo de acceso.
+
+---
+
+## Desarrollo
+
+```bash
+pip install -r requirements-dev.txt
+python -m ruff check .
+python -m pytest -q
+```
+
+GitHub Actions ejecuta lo mismo en Windows y Linux en cada push (`.github/workflows/ci.yml`).
+`cryptg` es opcional y no esta en `requirements.txt`: `_preparar.bat` intenta instalarlo aparte y, si no hay version para tu Python, sigue sin el.

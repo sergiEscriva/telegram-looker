@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 140
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "BLE"]
+
+[tool.ruff.lint.per-file-ignores]
+"tgdl/html_export.py" = ["E501"]  # plantilla HTML/CSS embebida
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -15,7 +15,7 @@ from telethon.tl.types import ChatInviteAlready, ChatInvitePeek, MessageService
 
 from .bd import BD
 from .config import RUTA_BD, SALIDA_POR_DEFECTO
-from .html_export import generar_html
+from .html_export import generar_html_async
 from .informes import Informe, resumen_stats
 from .utilidades import (TIPOS, clasificar, clave_archivo, extension, limpiar, parse_fecha, parse_lista,
                          parse_tamano, tamano_legible)
@@ -85,8 +85,17 @@ class SinEspacio(Exception):
     pass
 
 
+class Detenido(Exception):
+    """Se lanza dentro de una descarga en curso cuando el usuario pide detener."""
+
+
+# Canales que se están descargando ahora mismo (en cualquier trabajo): evita que dos
+# descargas del mismo canal escriban a la vez los mismos archivos.
+_CANALES_ACTIVOS: set = set()
+
+
 class Limitador:
-    """Limita la velocidad total de descarga (compartido entre todas las descargas)."""
+    """Limita la velocidad total de descarga de un trabajo (compartido por todas sus cuentas y canales)."""
 
     def __init__(self, bytes_por_segundo: int):
         self.bps = bytes_por_segundo
@@ -110,21 +119,43 @@ class Contexto:
     limitador: Limitador
     detener: asyncio.Event
     descargas: list = field(default_factory=list)
+    canales: set = field(default_factory=set)   # canales reservados en _CANALES_ACTIVOS por este trabajo
+    reservado: list = field(default_factory=lambda: [0])  # bytes de descargas en curso (para el espacio libre)
 
 
 class _LogTelethon(logging.Handler):
-    """Reenvía al informe los avisos de Telethon (sobre todo esperas por FloodWait)."""
+    """Reenvía los avisos de Telethon (sobre todo esperas por FloodWait) a los trabajos que usan esa cuenta.
 
-    def __init__(self, informe):
+    Cada cliente registra en "tgdl.cuenta.<nombre>" (ver cuentas.py), así que el aviso de una
+    cuenta solo aparece en los trabajos que la usan.
+    """
+
+    def __init__(self):
         super().__init__(logging.INFO)
-        self.informe = informe
+        self.destinos: dict = {}  # nombre de cuenta -> [informes]
 
     def emit(self, record):
+        partes = record.name.split(".")
+        cuenta = partes[2] if len(partes) > 2 else None
+        informes = self.destinos.get(cuenta, ())
+        if not informes:
+            return
         texto = record.getMessage()
         if "flood wait" in texto.lower():
-            self.informe.log(f"⏳ Telegram pide esperar: {texto}", "aviso")
+            mensaje, nivel = f"⏳ [{cuenta}] Telegram pide esperar: {texto}", "aviso"
         elif record.levelno >= logging.ERROR:
-            self.informe.log(f"Telethon: {texto}", "error")
+            mensaje, nivel = f"Telethon [{cuenta}]: {texto}", "error"
+        else:
+            return
+        for informe in informes:
+            informe.log(mensaje, nivel)
+
+
+_LOG_TELETHON = _LogTelethon()
+_log_cuentas = logging.getLogger("tgdl.cuenta")
+_log_cuentas.setLevel(logging.INFO)
+_log_cuentas.propagate = False  # que no se mezcle con las barras de progreso de la consola
+_log_cuentas.addHandler(_LOG_TELETHON)
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +164,9 @@ class _LogTelethon(logging.Handler):
 async def resolver(cliente, objetivo):
     """@usuario, enlace t.me, enlace de invitación o ID numérico -> entidad."""
     texto = str(objetivo).strip()
+    privado = re.search(r"t\.me/c/(\d+)", texto)  # enlace a un mensaje de canal privado
+    if privado:
+        texto = f"-100{privado.group(1)}"
     m = re.search(r"(?:t\.me/\+|t\.me/joinchat/|^\+)([\w-]+)", texto)
     if m:
         info = await cliente(CheckChatInviteRequest(m.group(1)))
@@ -164,7 +198,7 @@ class DescargaCanal:
         self.k, self.n = particion
         self.canal_id = utils.get_peer_id(entidad)
         self.titulo = getattr(entidad, "title", None) or getattr(entidad, "username", None) or str(self.canal_id)
-        self.carpeta = Path(ctx.opc.salida) / limpiar(self.titulo, 80)
+        self.carpeta = self._carpeta_canal()
         self.clave = f"{self.canal_id}:{cuenta}"
         self.es_foro = bool(getattr(entidad, "forum", False))
         self.cola: asyncio.Queue = asyncio.Queue(maxsize=ctx.opc.hilos * 4)
@@ -180,8 +214,35 @@ class DescargaCanal:
         self.manejador = None
 
     # ---- preparación ------------------------------------------------------
+    def _carpeta_canal(self) -> Path:
+        """Carpeta del canal: «Título [id]», para que dos canales con el mismo nombre no se mezclen.
+
+        Si el canal ya se descargó antes en esta misma carpeta de destino, se reutiliza la que tenía.
+        """
+        salida = Path(self.ctx.opc.salida)
+        previo = self.ctx.bd.canal(self.canal_id)
+        if previo and previo["carpeta"]:
+            anterior = Path(previo["carpeta"])
+            if anterior.is_dir() and anterior.parent.resolve() == salida.resolve():
+                return anterior
+        return salida / f"{limpiar(self.titulo, 70)} [{abs(self.canal_id)}]"
+
     def _mio(self, msg_id: int) -> bool:
         return msg_id % self.n == self.k
+
+    async def _rango_ids(self):
+        """(primero, último) id de mensaje dentro del filtro de fechas, o None si no hay filtro."""
+        o = self.ctx.opc
+        if not (o.desde or o.hasta):
+            return None
+        primero = 1
+        if o.desde:
+            r = await self.cliente.get_messages(self.entidad, limit=1, offset_date=o.desde, reverse=True)
+            if not r:
+                return (1, 0)
+            primero = r[0].id
+        r = await self.cliente.get_messages(self.entidad, limit=1, **({"offset_date": o.hasta} if o.hasta else {}))
+        return (primero, r[0].id if r else 0)
 
     async def preparar(self):
         self.carpeta.mkdir(parents=True, exist_ok=True)
@@ -190,7 +251,12 @@ class DescargaCanal:
         if self.es_foro:
             await self._cargar_temas()
         total = (await self.cliente.get_messages(self.entidad, limit=0)).total
-        hechos = sum(1 for h in self.hechos if self._mio(h))
+        rango = await self._rango_ids()
+        if rango:  # con filtro de fechas el total es aproximado (los ids pueden tener huecos)
+            total = min(total, max(0, rango[1] - rango[0] + 1))
+            hechos = sum(1 for h in self.hechos if self._mio(h) and rango[0] <= h <= rango[1])
+        else:
+            hechos = sum(1 for h in self.hechos if self._mio(h))
         if self.n > 1:
             total = total // self.n + 1
         self.ctx.informe.canal_inicio(self.clave, self.titulo, total, min(hechos, total), self.cuenta)
@@ -243,8 +309,12 @@ class DescargaCanal:
         if o.comentarios and self.k == 0 and not self.ctx.detener.is_set():
             await self._descargar_comentarios()
         await self.cola.join()
-        for post_id, ultimo in self.hilos_vistos.items():
-            self.ctx.bd.guardar_hilo(self.canal_id, post_id, ultimo)
+        # Si se detuvo, parte de los comentarios recorridos no llegó a descargarse: no se marca el
+        # hilo como visto para que se revisen otra vez la próxima vez.
+        if not self.ctx.detener.is_set():
+            for post_id, ultimo in self.hilos_vistos.items():
+                self.ctx.bd.guardar_hilo(self.canal_id, post_id, ultimo)
+        self.ctx.bd.confirmar()
         self.ctx.informe.canal_fin(self.clave, self.stats)
 
     def _registrar(self, msg, estado, **campos):
@@ -320,6 +390,8 @@ class DescargaCanal:
             maximo = ultimo
             try:
                 async for c in self.cliente.iter_messages(self.entidad, reply_to=post_id, reverse=True, min_id=ultimo):
+                    if self.ctx.detener.is_set():
+                        break
                     maximo = max(maximo, c.id)
                     grupo = utils.get_peer_id(c.peer_id)
                     if grupo not in self._hechos_otros:
@@ -344,15 +416,24 @@ class DescargaCanal:
             except SinEspacio as e:
                 self.ctx.informe.log(str(e), "error")
                 self.ctx.detener.set()
+            except Detenido:
+                pass  # no cuenta como fallo: se descargará la próxima vez
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - un fallo no debe parar el canal
                 self.stats["fallos"] += 1
                 self.ctx.informe.log(f"Mensaje {item[0].id}: {type(e).__name__}: {e}", "error")
+                msg, tipo, _base, post_id, tema = item
+                try:  # queda como fallo para reintentarlo (también si es un comentario)
+                    self._registrar(msg, "fallo", tipo=tipo, tamano=msg.file.size, tema=tema, post_id=post_id)
+                except Exception:  # noqa: BLE001
+                    pass
             finally:
                 self.ctx.informe.archivo_fin(slot)
                 self.ctx.informe.avance(self.clave)
                 self.cola.task_done()
+                if self.cola.empty():
+                    self.ctx.bd.confirmar()
 
     def _nombre(self, msg) -> str:
         f = msg.file
@@ -376,14 +457,21 @@ class DescargaCanal:
         else:
             carpeta = base / tipo
         carpeta.mkdir(parents=True, exist_ok=True)
-        return carpeta / self._nombre(msg)
+        nombre = self._nombre(msg)
+        if os.name == "nt":  # Windows limita la ruta completa a 260 caracteres (MAX_PATH)
+            libre = 250 - len(str(carpeta.resolve())) - 1 - len(".part")
+            if len(nombre) > libre:
+                nombre = limpiar(nombre, max(libre, len(str(msg.id)) + 12))
+        return carpeta / nombre
 
     @staticmethod
     def _enlazar(origen: Path, destino: Path) -> Path:
         """Enlace duro (no ocupa espacio extra). Si no se puede, se referencia el original."""
         try:
-            if not destino.exists():
-                os.link(origen, destino)
+            if destino.exists():
+                # Solo se reutiliza si ya es el mismo archivo; si es otro, se apunta al original.
+                return destino if os.path.samefile(origen, destino) else origen
+            os.link(origen, destino)
             return destino
         except OSError:
             return origen
@@ -412,10 +500,16 @@ class DescargaCanal:
                     return
 
         libre = shutil.disk_usage(destino.parent).free
-        if libre - tamano < o.espacio_minimo:
+        reservado = self.ctx.reservado
+        if libre - reservado[0] - tamano < o.espacio_minimo:
             raise SinEspacio(f"Espacio insuficiente en disco ({tamano_legible(libre)} libres). Descarga detenida.")
 
-        if await self._descargar(slot, msg, destino):
+        reservado[0] += tamano  # cuenta lo que ocuparán las descargas que ya están en marcha
+        try:
+            correcto = await self._descargar(slot, msg, destino)
+        finally:
+            reservado[0] -= tamano
+        if correcto:
             self._registrar(msg, "ok", ruta=str(destino), **campos)
             self.ctx.bd.guardar_archivo(clave, destino, tamano)
             self.stats["ok"] += 1
@@ -436,14 +530,20 @@ class DescargaCanal:
                 ultimo = [0]
 
                 async def progreso(recibido, _total):
+                    if self.ctx.detener.is_set():
+                        raise Detenido()
                     delta, ultimo[0] = recibido - ultimo[0], recibido
                     informe.archivo_progreso(slot, recibido)
                     await self.ctx.limitador.consumir(delta)
 
                 if await self.cliente.download_media(msg, file=str(tmp), progress_callback=progreso) is None:
+                    self._borrar(tmp)
                     return False
                 os.replace(tmp, destino)
                 return True
+            except (Detenido, asyncio.CancelledError):
+                self._borrar(tmp)
+                raise
             except errors.FloodWaitError as e:
                 informe.log(f"⏳ Telegram pide esperar {e.seconds}s (FloodWait)...", "aviso")
                 await asyncio.sleep(e.seconds + 2)
@@ -458,8 +558,15 @@ class DescargaCanal:
                 informe.log(f"Mensaje {msg.id}: {type(e).__name__}: {e} -> reintento {intento}/{intentos} en {espera}s",
                             "aviso")
                 await asyncio.sleep(espera)
-        tmp.unlink(missing_ok=True)
+        self._borrar(tmp)
         return False
+
+    @staticmethod
+    def _borrar(ruta: Path):
+        try:
+            ruta.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     # ---- vigilancia ---------------------------------------------------------
     def activar_seguimiento(self):
@@ -495,7 +602,7 @@ async def _al_terminar_canal(ctx: Contexto, grupo: list):
     stats = {k: sum(d.stats[k] for d in grupo) for k in principal.stats}
     if ctx.opc.html:
         try:
-            ruta = generar_html(ctx.bd, principal.canal_id)
+            ruta = await generar_html_async(ctx.bd, principal.canal_id)
             ctx.informe.log(f"🌐 Archivo navegable: {ruta}")
         except Exception as e:  # noqa: BLE001
             ctx.informe.log(f"No se pudo generar el HTML: {e}", "aviso")
@@ -508,6 +615,12 @@ async def _al_terminar_canal(ctx: Contexto, grupo: list):
 
 
 async def _correr_grupo(ctx: Contexto, grupo: list):
+    canal_id = grupo[0].canal_id
+    if canal_id in _CANALES_ACTIVOS:
+        ctx.informe.log(f"«{grupo[0].titulo}» ya se está descargando (en este u otro trabajo): se omite.", "aviso")
+        return
+    _CANALES_ACTIVOS.add(canal_id)  # se libera al terminar ejecutar() (también tras la vigilancia)
+    ctx.canales.add(canal_id)
     ctx.descargas.extend(grupo)
     try:
         for d in grupo:
@@ -576,9 +689,10 @@ async def _vigilar(ctx: Contexto):
             pendientes = {d.canal_id for d in ctx.descargas if d.cambios}
             for d in ctx.descargas:
                 d.cambios = False
+            ctx.bd.confirmar()
             for canal_id in pendientes:
                 try:
-                    generar_html(ctx.bd, canal_id)
+                    await generar_html_async(ctx.bd, canal_id)
                 except Exception as e:  # noqa: BLE001
                     ctx.informe.log(f"No se pudo actualizar el HTML: {e}", "aviso")
 
@@ -592,11 +706,8 @@ async def ejecutar(clientes: dict, objetivos: list, opc: Opciones, informe: Info
     propia_bd = bd is None
     ctx = Contexto(bd or BD(RUTA_BD), opc.validar(), informe, Limitador(opc.limite_velocidad),
                    detener or asyncio.Event())
-    log_telethon = logging.getLogger("telethon")
-    manejador_log = _LogTelethon(informe)
-    log_telethon.addHandler(manejador_log)
-    log_telethon.setLevel(logging.INFO)
-    log_telethon.propagate = False
+    for nombre in clientes:
+        _LOG_TELETHON.destinos.setdefault(nombre, []).append(informe)
     informe.fase("descargando")
     try:
         if opc.reparto == "mensajes" and len(clientes) > 1:
@@ -608,7 +719,14 @@ async def ejecutar(clientes: dict, objetivos: list, opc: Opciones, informe: Info
     finally:
         for d in ctx.descargas:
             await d.cerrar()
-        log_telethon.removeHandler(manejador_log)
+        _CANALES_ACTIVOS.difference_update(ctx.canales)
+        for nombre in clientes:
+            lista = _LOG_TELETHON.destinos.get(nombre, [])
+            if informe in lista:
+                lista.remove(informe)
+            if not lista:
+                _LOG_TELETHON.destinos.pop(nombre, None)
+        ctx.bd.confirmar()
         if propia_bd:
             ctx.bd.cerrar()
         informe.fase("terminado")

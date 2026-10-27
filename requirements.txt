@@ -1,4 +1,6 @@
-telethon>=1.36
-tqdm>=4.66
-aiohttp>=3.9
-cryptg>=0.4  # opcional: acelera mucho las descargas
+telethon>=1.36,<2
+tqdm>=4.66,<5
+aiohttp>=3.9,<4
+# Opcional (acelera mucho las descargas): pip install cryptg
+# No se incluye aquí porque no siempre hay versión precompilada y haría fallar toda la instalación;
+# _preparar.bat intenta instalarlo aparte.

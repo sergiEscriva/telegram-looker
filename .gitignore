@@ -28,3 +28,5 @@ __pycache__/
 .idea/
 .gemini/
 .agents/
+.pytest_cache/
+.ruff_cache/

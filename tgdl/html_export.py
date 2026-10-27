@@ -1,6 +1,8 @@
 """Genera un archivo HTML navegable (sin conexión) de cada canal descargado."""
+import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -18,12 +20,12 @@ def _url(ruta, carpeta: Path):
     return quote(rel.replace(os.sep, "/"))
 
 
-def generar_html(bd, canal_id: int) -> Path:
+def _recoger(bd, canal_id: int):
+    """Lee de la base de datos todo lo que necesita el HTML (rápido, en el hilo principal)."""
     canal = bd.canal(canal_id)
     if canal is None:
         raise ValueError("Ese canal no está en la base de datos")
     carpeta = Path(canal["carpeta"])
-    carpeta.mkdir(parents=True, exist_ok=True)
     mensajes = []
     for f in bd.mensajes_de(canal_id):
         mensajes.append({
@@ -33,14 +35,34 @@ def generar_html(bd, canal_id: int) -> Path:
         })
     res = bd.resumen(canal_id)
     datos = {
-        "titulo": canal["titulo"], "generado": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "titulo": canal["titulo"] or "", "generado": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "tamano": tamano_legible(res["bytes"]), "archivos": res["archivos"], "mensajes": mensajes,
     }
-    json_datos = json.dumps(datos, ensure_ascii=False).replace("</", "<\\/")
-    html = _PLANTILLA.replace("__TITULO__", _escapar(canal["titulo"])).replace("__DATOS__", json_datos)
+    return carpeta, datos
+
+
+def _escribir(carpeta: Path, datos: dict) -> Path:
+    """Genera y guarda el index.html (lento con canales grandes: puede ir en otro hilo)."""
+    # "<" se escapa siempre dentro del JSON para que ningún texto pueda cerrar el <script>.
+    json_datos = json.dumps(datos, ensure_ascii=False).replace("<", "\\u003c")
+    valores = {"__TITULO__": _escapar(datos["titulo"]), "__DATOS__": json_datos}
+    # Una sola pasada: lo que se inserta nunca se vuelve a interpretar como marcador
+    # (un canal llamado "__DATOS__" no puede meter el JSON sin escapar en el HTML).
+    html = re.sub(r"__TITULO__|__DATOS__", lambda m: valores[m.group(0)], _PLANTILLA)
+    carpeta.mkdir(parents=True, exist_ok=True)
     ruta = carpeta / "index.html"
     ruta.write_text(html, encoding="utf-8")
     return ruta
+
+
+def generar_html(bd, canal_id: int) -> Path:
+    return _escribir(*_recoger(bd, canal_id))
+
+
+async def generar_html_async(bd, canal_id: int) -> Path:
+    """Igual que generar_html, pero sin bloquear el bucle asyncio mientras se escribe."""
+    carpeta, datos = _recoger(bd, canal_id)
+    return await asyncio.to_thread(_escribir, carpeta, datos)
 
 
 def _escapar(texto: str) -> str:
@@ -215,7 +237,7 @@ const fmt = n => { const u=["B","KB","MB","GB","TB"]; let i=0; while(n>=1024&&i<
 const esc = s => s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const enl = s => esc(s).replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
 
-$("#titulo").textContent = D.titulo; $("#av").textContent = (D.titulo||"?").trim()[0].toUpperCase();
+$("#titulo").textContent = D.titulo; $("#av").textContent = ((D.titulo||"").trim()[0]||"?").toUpperCase();
 document.title = D.titulo + " · Archivo de Telegram";
 
 // Agrupar: publicaciones (con álbumes unidos) y comentarios por publicación
