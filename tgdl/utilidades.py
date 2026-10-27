@@ -8,19 +8,28 @@ from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
 TIPOS = ("fotos", "videos", "audios", "documentos", "stickers")
 
 _INVALIDOS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# Nombres que Windows no permite como archivo o carpeta (con o sin extensión)
+_RESERVADOS = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+_MAX_BYTES = 200  # Linux/macOS limitan cada nombre a 255 bytes en UTF-8; se deja margen para ".part"
 _UNIDADES = {"": 1, "b": 1, "k": 1024, "kb": 1024, "m": 1024**2, "mb": 1024**2,
              "g": 1024**3, "gb": 1024**3, "t": 1024**4, "tb": 1024**4}
 
 
 def limpiar(nombre: str, maximo: int = 120) -> str:
     """Convierte un texto en un nombre de archivo/carpeta válido en Windows."""
-    nombre = re.sub(r"\s+", " ", _INVALIDOS.sub("_", nombre or "")).strip().rstrip(".")
+    nombre = re.sub(r"\s+", " ", _INVALIDOS.sub("_", nombre or "")).strip().rstrip(". ")
+    base, ext = os.path.splitext(nombre)
+    if len(ext) > 10:
+        base, ext = nombre, ""
     if len(nombre) > maximo:
-        base, ext = os.path.splitext(nombre)
-        if len(ext) > 10:
-            base, ext = nombre, ""
-        nombre = base[: maximo - len(ext)].rstrip() + ext
-    return nombre or "archivo"
+        base = base[: maximo - len(ext)]
+    while base and len((base + ext).encode("utf-8")) > _MAX_BYTES:
+        base = base[:-1]
+    nombre = (base.rstrip(". ") + ext) if base else ext.lstrip(".")
+    nombre = nombre.strip() or "archivo"
+    if nombre.split(".", 1)[0].strip().upper() in _RESERVADOS:
+        nombre = "_" + nombre
+    return nombre
 
 
 def parse_tamano(texto) -> int:

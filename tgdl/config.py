@@ -28,6 +28,14 @@ def cargar_config() -> dict:
     return cfg
 
 
+def entero(cfg: dict, clave: str, defecto: int) -> int:
+    """Lee un número del .env; si falta, está vacío o no es válido, usa el valor por defecto."""
+    try:
+        return int(str(cfg.get(clave, "")).strip())
+    except ValueError:
+        return defecto
+
+
 def guardar_en_env(valores: dict):
     """Actualiza (o añade) claves en el .env conservando el resto del archivo."""
     lineas = RUTA_ENV.read_text(encoding="utf-8").splitlines() if RUTA_ENV.exists() else []

@@ -24,7 +24,9 @@ for _stream in (sys.stdout, sys.stderr):
 
 try:
     from tgdl.bd import BD
-    from tgdl.config import RUTA_BD, SALIDA_POR_DEFECTO, cargar_config, obtener_credenciales
+    from telethon import errors, utils
+
+    from tgdl.config import RUTA_BD, SALIDA_POR_DEFECTO, cargar_config, entero, obtener_credenciales
     from tgdl.cuentas import GestorCuentas, validar_nombre
     from tgdl.html_export import generar_html
     from tgdl.informes import InformeConsola
@@ -46,12 +48,12 @@ def parsear_args(cfg: dict):
     g.add_argument("--añadir-cuenta", "--anadir-cuenta", dest="anadir_cuenta", metavar="NOMBRE", help="Inicia sesión con una cuenta nueva.")
     g.add_argument("--eliminar-cuenta", metavar="NOMBRE", help="Cierra la sesión y borra una cuenta.")
     g.add_argument("--listar-cuentas", action="store_true", help="Muestra las cuentas guardadas.")
-    g.add_argument("--reparto", choices=("canal", "mensajes"), default=cfg.get("REPARTO", "canal"),
+    g.add_argument("--reparto", choices=("canal", "mensajes"), default=cfg.get("REPARTO") or "canal",
                    help="canal: cada cuenta baja canales distintos. mensajes: todas las cuentas se reparten cada canal.")
 
     g = p.add_argument_group("descarga")
-    g.add_argument("-o", "--salida", default=cfg.get("CARPETA_DESTINO", str(SALIDA_POR_DEFECTO)), help="Carpeta de destino.")
-    g.add_argument("-n", "--hilos", type=int, default=int(cfg.get("HILOS", 3)), help="Descargas simultáneas por cuenta (def. 3).")
+    g.add_argument("-o", "--salida", default=cfg.get("CARPETA_DESTINO") or str(SALIDA_POR_DEFECTO), help="Carpeta de destino.")
+    g.add_argument("-n", "--hilos", type=int, default=entero(cfg, "HILOS", 3), help="Descargas simultáneas por cuenta (def. 3).")
     g.add_argument("--seguir", action="store_true", help="Tras el historial, sigue descargando los mensajes nuevos al instante.")
     g.add_argument("--comentarios", action="store_true", help="Descarga también los comentarios de las publicaciones.")
     g.add_argument("--nombres", choices=("original", "texto"), default="original",
@@ -155,10 +157,12 @@ async def main():
 
         if args.regenerar_html:
             bd = BD(RUTA_BD)
-            for obj in objetivos:
-                from telethon import utils
-                ent = await resolver(principal, obj)
-                print(f"🌐 {generar_html(bd, utils.get_peer_id(ent))}")
+            try:
+                for obj in objetivos:
+                    ent = await resolver(principal, obj)
+                    print(f"🌐 {generar_html(bd, utils.get_peer_id(ent))}")
+            finally:
+                bd.cerrar()
             return
 
         opc = Opciones.desde_dict({
@@ -184,6 +188,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n\n⏸  Interrumpido. El progreso está guardado: vuelve a ejecutarlo para continuar.")
-    except ValueError as e:
+    except (ValueError, errors.RPCError) as e:
         print(f"\n❌ {e}")
         sys.exit(1)

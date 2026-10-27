@@ -11,8 +11,11 @@ const hue = t => [...String(t)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 36
 const avatar = t => `background:linear-gradient(135deg,hsl(${hue(t)} 70% 58%),hsl(${(hue(t) + 50) % 360} 70% 48%))`;
 const inicial = t => (String(t || "?").trim()[0] || "?").toUpperCase();
 
+// Token que el panel mete en la página: sin él la API rechaza la petición (protege de otras webs).
+const TOKEN = document.querySelector('meta[name="tgdl-token"]')?.content || "";
+
 async function api(url, opts = {}) {
-  const r = await fetch(url, { method: opts.method || "GET", headers: { "Content-Type": "application/json" }, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const r = await fetch(url, { method: opts.method || "GET", headers: { "Content-Type": "application/json", "X-Token": TOKEN }, body: opts.body ? JSON.stringify(opts.body) : undefined });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || r.statusText);
   return d;
@@ -74,7 +77,7 @@ reloj(); setInterval(reloj, 10000);
 
 /* ------------------------------------------------------------------ tiempo real */
 function conectarWS() {
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  const ws = new WebSocket(`ws://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
   const ind = $("#conexion");
   ws.onopen = () => { ind.className = "estado-conexion ok"; ind.querySelector("span").textContent = "Conectado"; };
   ws.onmessage = e => renderTrabajos(JSON.parse(e.data).trabajos);
@@ -343,8 +346,14 @@ $("#btn-anadir-cuenta").onclick = () => {
   ["#mc-telefono", "#mc-codigo", "#mc-password"].forEach(s => $(s).value = "");
   modal.hidden = false; pasoModal(1);
 };
-$("#cerrar-modal").onclick = () => modal.hidden = true;
-modal.addEventListener("click", e => { if (e.target === modal) modal.hidden = true; });
+function cerrarModal() {
+  modal.hidden = true;
+  // Si el login se quedó a medias, se avisa al panel para que libere la sesión sin terminar.
+  if (!$('.modal-paso[data-paso="1"]', modal).classList.contains("on"))
+    api("/api/cuentas/cancelar", { method: "POST", body: { nombre: $("#mc-nombre").value.trim() } }).catch(() => { });
+}
+$("#cerrar-modal").onclick = cerrarModal;
+modal.addEventListener("click", e => { if (e.target === modal) cerrarModal(); });
 
 async function accionModal(btn, fn) {
   btn.disabled = true; $("#mc-error").textContent = "";
@@ -352,7 +361,7 @@ async function accionModal(btn, fn) {
 }
 async function terminarLogin(r) {
   if (r.resultado === "password") return pasoModal(3);
-  modal.hidden = true;
+  modal.hidden = true; pasoModal(1);
   toast(`✅ Cuenta añadida: ${r.cuenta?.nombre_mostrado || $("#mc-nombre").value}`, "ok");
   cargarCuentas();
 }
