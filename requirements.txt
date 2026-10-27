@@ -1,0 +1,4 @@
+telethon>=1.36
+tqdm>=4.66
+aiohttp>=3.9
+cryptg>=0.4  # opcional: acelera mucho las descargas

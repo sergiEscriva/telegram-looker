@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TG Downloader · Panel</title>
+<meta name="description" content="Panel local para descargar automáticamente canales y grupos de Telegram con una o varias cuentas.">
+<link rel="stylesheet" href="/estatico/app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <radialGradient id="orbe" cx="50%" cy="30%" r="70%"><stop offset="0" stop-color="#b9ecff"/><stop offset=".5" stop-color="#2b93dc"/><stop offset="1" stop-color="#0a3f80"/></radialGradient>
+    <linearGradient id="brillo" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <symbol id="icono-app" viewBox="0 0 32 32">
+      <circle cx="16" cy="16" r="14.5" fill="url(#orbe)" stroke="#08376f"/>
+      <path d="M16 8v11M11 14.5l5 5 5-5M10.5 23.5h11" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <ellipse cx="16" cy="10" rx="10.5" ry="6.5" fill="url(#brillo)"/>
+    </symbol>
+  </defs>
+</svg>
+
+<div class="escritorio">
+  <div class="ventana" id="ventana">
+    <!-- Barra de título Aero -->
+    <div class="barra-titulo" id="barra-titulo">
+      <svg class="icono-titulo"><use href="#icono-app"/></svg>
+      <span>TG Downloader</span>
+      <div class="botones-ventana">
+        <button class="bv min" id="bv-min" title="Minimizar" aria-label="Minimizar"><i></i></button>
+        <button class="bv max" id="bv-max" title="Maximizar" aria-label="Maximizar"><i></i></button>
+        <button class="bv cerrar" id="bv-cerrar" title="Cerrar" aria-label="Cerrar"><i>✕</i></button>
+      </div>
+    </div>
+
+    <!-- Barra de direcciones (sobre el cristal) -->
+    <div class="barra-direccion">
+      <button class="nav-flecha" id="btn-atras" title="Atrás" aria-label="Atrás" disabled>◀</button>
+      <button class="nav-flecha" id="btn-adelante" title="Adelante" aria-label="Adelante" disabled>▶</button>
+      <div class="direccion">
+        <svg class="mini-icono"><use href="#icono-app"/></svg>
+        <span>TG Downloader</span><b>›</b><span id="ruta">Panel</span>
+      </div>
+      <button class="refrescar" id="btn-refrescar" title="Actualizar" aria-label="Actualizar">↻</button>
+    </div>
+
+    <!-- Barra de comandos -->
+    <div class="barra-comandos">
+      <button class="comando" data-ir="nueva" id="cmd-nueva"><span>⬇</span> Nueva descarga</button>
+      <button class="comando" id="cmd-cuenta"><span>👤</span> Añadir cuenta</button>
+      <button class="comando" data-ir="archivo" id="cmd-archivo"><span>🗂️</span> Abrir archivo</button>
+      <span class="separador"></span>
+      <button class="comando" id="cmd-ayuda" title="Ayuda"><span>❔</span></button>
+    </div>
+
+    <div class="cuerpo">
+      <!-- Panel de navegación -->
+      <aside class="panel-nav">
+        <h4>Vínculos favoritos</h4>
+        <nav>
+          <button class="nav on" data-vista="panel" id="nav-panel"><span>📊</span> Descargas <em id="badge-activos" hidden>0</em></button>
+          <button class="nav" data-vista="nueva" id="nav-nueva"><span>✨</span> Nueva descarga</button>
+          <button class="nav" data-vista="cuentas" id="nav-cuentas"><span>👥</span> Cuentas</button>
+          <button class="nav" data-vista="archivo" id="nav-archivo"><span>🗂️</span> Archivo</button>
+        </nav>
+        <div class="gadget" id="gadget">
+          <div class="gadget-titulo">Velocidad</div>
+          <div class="gadget-valor" id="g-vel">0 B/s</div>
+          <div class="gadget-medidor"><i id="g-medidor"></i></div>
+          <div class="gadget-pie" id="g-pie">Sin descargas activas</div>
+        </div>
+      </aside>
+
+      <main class="contenido" id="contenido">
+        <!-- PANEL -->
+        <section class="vista on" id="vista-panel">
+          <header class="titular">
+            <div><h1>Descargas</h1><p>Progreso en tiempo real de todas tus descargas.</p></div>
+            <button class="btn primario" data-ir="nueva" id="btn-ir-nueva">Nueva descarga…</button>
+          </header>
+          <div class="metricas">
+            <div class="metrica"><small>Velocidad</small><strong id="m-vel">0 B/s</strong></div>
+            <div class="metrica"><small>Descargado (sesión)</small><strong id="m-bytes">0 B</strong></div>
+            <div class="metrica"><small>Archivos en curso</small><strong id="m-archivos">0</strong></div>
+            <div class="metrica"><small>Trabajos activos</small><strong id="m-activos">0</strong></div>
+          </div>
+          <div id="lista-trabajos"></div>
+          <div class="vacio" id="trabajos-vacio">
+            <svg class="vacio-ic"><use href="#icono-app"/></svg>
+            <h2>No hay descargas todavía</h2>
+            <p>Elige un canal y empieza a descargar todo su contenido.</p>
+            <button class="btn primario" data-ir="nueva" id="btn-vacio-nueva">Empezar</button>
+          </div>
+        </section>
+
+        <!-- NUEVA DESCARGA -->
+        <section class="vista" id="vista-nueva">
+          <header class="titular"><div><h1>Nueva descarga</h1><p>Tres pasos: cuentas, canales y opciones.</p></div></header>
+
+          <fieldset class="paso">
+            <legend><span class="num">1</span> Cuentas</legend>
+            <div class="chips" id="sel-cuentas"></div>
+            <p class="ayuda" id="sin-cuentas" hidden>No tienes cuentas. <a href="#" data-ir="cuentas">Añade una</a> para empezar.</p>
+            <div class="reparto" id="reparto" hidden>
+              <label class="opcion-radio"><input type="radio" name="reparto" value="canal" checked>
+                <div><b>Un canal por cuenta</b><small>Cada cuenta descarga canales distintos en paralelo.</small></div></label>
+              <label class="opcion-radio"><input type="radio" name="reparto" value="mensajes">
+                <div><b>Repartir mensajes</b><small>Todas las cuentas colaboran en cada canal (más rápido, más riesgo de límites).</small></div></label>
+            </div>
+          </fieldset>
+
+          <fieldset class="paso">
+            <legend><span class="num">2</span> Canales <span class="contador" id="contador-canales">0 seleccionados</span></legend>
+            <div class="fila">
+              <input class="campo" id="buscar-canal" type="search" placeholder="Filtrar tus canales y grupos…">
+              <input class="campo" id="enlace-canal" placeholder="o pega @usuario / enlace t.me y pulsa Intro">
+            </div>
+            <div class="lista-canales" id="lista-canales"><div class="cargando">Elige una cuenta para ver sus canales.</div></div>
+            <div class="seleccionados" id="seleccionados"></div>
+          </fieldset>
+
+          <fieldset class="paso">
+            <legend><span class="num">3</span> Opciones</legend>
+            <h3>Qué descargar</h3>
+            <div class="chips" id="sel-tipos"></div>
+            <div class="interruptores">
+              <label class="interruptor"><input type="checkbox" id="op-seguir"><span></span><div><b>Modo vigilancia</b><small>Al terminar, sigue bajando lo nuevo al instante.</small></div></label>
+              <label class="interruptor"><input type="checkbox" id="op-comentarios"><span></span><div><b>Comentarios</b><small>Incluye lo que se adjunta en los comentarios.</small></div></label>
+              <label class="interruptor"><input type="checkbox" id="op-albumes" checked><span></span><div><b>Álbumes en carpetas</b><small>Cada álbum en su propia carpeta.</small></div></label>
+              <label class="interruptor"><input type="checkbox" id="op-deduplicar" checked><span></span><div><b>Evitar duplicados</b><small>Un archivo repetido no se baja dos veces.</small></div></label>
+              <label class="interruptor"><input type="checkbox" id="op-html" checked><span></span><div><b>Archivo HTML</b><small>Genera una web navegable del canal.</small></div></label>
+              <label class="interruptor"><input type="checkbox" id="op-notificar" checked><span></span><div><b>Notificarme</b><small>Aviso en Mensajes guardados al terminar.</small></div></label>
+            </div>
+
+            <details class="avanzado">
+              <summary>Filtros</summary>
+              <div class="rejilla">
+                <label>Desde<input class="campo" type="date" id="op-desde"></label>
+                <label>Hasta<input class="campo" type="date" id="op-hasta"></label>
+                <label>Tamaño mínimo<input class="campo" id="op-min" placeholder="p. ej. 10MB"></label>
+                <label>Tamaño máximo<input class="campo" id="op-max" placeholder="p. ej. 2GB"></label>
+                <label>Solo extensiones<input class="campo" id="op-ext" placeholder="mp4,mkv,pdf"></label>
+                <label>Excluir extensiones<input class="campo" id="op-excluir" placeholder="apk,exe"></label>
+                <label class="ancho">Texto contiene<input class="campo" id="op-buscar" placeholder="Palabra en el texto o nombre del archivo"></label>
+              </div>
+            </details>
+            <details class="avanzado">
+              <summary>Avanzado</summary>
+              <div class="rejilla">
+                <label>Nombres de archivo<select class="campo" id="op-nombres"><option value="original">Nombre original</option><option value="texto">Según el texto del mensaje</option></select></label>
+                <label>Descargas simultáneas: <b id="hilos-val">3</b><input type="range" min="1" max="8" value="3" id="op-hilos"></label>
+                <label>Límite de velocidad<input class="campo" id="op-limite" placeholder="sin límite (p. ej. 5MB)"></label>
+                <label>Espacio mínimo libre<input class="campo" id="op-espacio" value="1GB"></label>
+                <label class="ancho">Carpeta de destino<input class="campo" id="op-salida"></label>
+              </div>
+            </details>
+          </fieldset>
+
+          <div class="barra-accion">
+            <div id="resumen-accion">Selecciona al menos una cuenta y un canal.</div>
+            <button class="btn primario grande" id="btn-iniciar" disabled>Iniciar descarga</button>
+          </div>
+        </section>
+
+        <!-- CUENTAS -->
+        <section class="vista" id="vista-cuentas">
+          <header class="titular">
+            <div><h1>Cuentas</h1><p>Puedes usar varias cuentas de Telegram a la vez.</p></div>
+            <button class="btn primario" id="btn-anadir-cuenta">Añadir cuenta…</button>
+          </header>
+          <div class="rejilla-tarjetas" id="lista-cuentas"></div>
+          <div class="nota-aviso"><span class="escudo">⚠️</span> Telegram vigila el uso de varias cuentas para saltarse sus límites. Usa cuentas antiguas y no subas demasiado las descargas simultáneas.</div>
+        </section>
+
+        <!-- ARCHIVO -->
+        <section class="vista" id="vista-archivo">
+          <header class="titular"><div><h1>Archivo</h1><p>Canales descargados. Ábrelos como una web navegable sin conexión.</p></div></header>
+          <div class="rejilla-tarjetas" id="lista-archivo"></div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Barra de estado -->
+    <div class="barra-estado">
+      <div class="estado-conexion" id="conexion"><i></i><span>Conectando…</span></div>
+      <span class="estado-sep"></span>
+      <span id="estado-resumen">Listo</span>
+    </div>
+  </div>
+
+  <!-- Barra de tareas -->
+  <div class="barra-tareas">
+    <button class="orbe" id="orbe" title="Inicio" aria-label="Inicio"><svg><use href="#icono-app"/></svg></button>
+    <button class="tarea activa" id="tarea-app"><svg><use href="#icono-app"/></svg> TG Downloader</button>
+    <div class="bandeja"><span id="bandeja-icono" title="Estado">📶</span><span class="reloj" id="reloj">--:--</span></div>
+  </div>
+</div>
+
+<!-- Diálogo añadir cuenta -->
+<div class="modal" id="modal-cuenta" hidden>
+  <div class="dialogo">
+    <div class="barra-titulo pequena">
+      <svg class="icono-titulo"><use href="#icono-app"/></svg><span>Añadir cuenta de Telegram</span>
+      <div class="botones-ventana"><button class="bv cerrar" id="cerrar-modal" aria-label="Cerrar"><i>✕</i></button></div>
+    </div>
+    <div class="dialogo-cuerpo">
+      <div class="pasos-modal"><i class="on"></i><i></i><i></i></div>
+      <div class="modal-paso on" data-paso="1">
+        <h2>Iniciar sesión</h2>
+        <p>Te enviaremos un código a tu app de Telegram.</p>
+        <label>Nombre para identificarla<input class="campo" id="mc-nombre" placeholder="principal" maxlength="32"></label>
+        <label>Teléfono (con prefijo)<input class="campo" id="mc-telefono" placeholder="+34 600 000 000" inputmode="tel"></label>
+        <div class="dialogo-botones"><button class="btn primario" id="mc-enviar">Enviar código</button></div>
+      </div>
+      <div class="modal-paso" data-paso="2">
+        <h2>Código de verificación</h2>
+        <p>Revisa los mensajes de Telegram en tu móvil.</p>
+        <input class="campo codigo" id="mc-codigo" placeholder="12345" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+        <div class="dialogo-botones"><button class="btn primario" id="mc-verificar">Verificar</button></div>
+      </div>
+      <div class="modal-paso" data-paso="3">
+        <h2>Verificación en dos pasos</h2>
+        <p>Esta cuenta tiene contraseña. Escríbela para terminar.</p>
+        <input class="campo" id="mc-password" type="password" placeholder="Contraseña">
+        <div class="dialogo-botones"><button class="btn primario" id="mc-password-ok">Aceptar</button></div>
+      </div>
+      <div class="modal-error" id="mc-error"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<script src="/estatico/app.js"></script>
+</body>
+</html>

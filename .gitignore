@@ -1,0 +1,30 @@
+# Variables de entorno y credenciales (NUNCA SUBIR)
+.env
+.env.*
+!.env.ejemplo
+
+# Sesiones de Telegram (claves criptográficas y tokens)
+*.session
+*.session-journal
+sesiones/
+
+# Base de datos local y archivos descargados
+datos.db*
+descargas/
+
+# Entorno virtual de Python
+.venv/
+env/
+venv/
+
+# Temporales de Python y del sistema
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+
+# Editores
+.vscode/
+.idea/
+.gemini/
+.agents/
