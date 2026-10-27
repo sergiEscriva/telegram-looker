@@ -85,6 +85,11 @@
             <div class="metrica"><small>Trabajos activos</small><strong id="m-activos">0</strong></div>
           </div>
           <div id="lista-trabajos"></div>
+          <section class="programadas" id="bloque-programadas" hidden>
+            <h3>⏰ Descargas programadas</h3>
+            <p class="sub">Se lanzan solas a su hora mientras el panel esté abierto (si estaba cerrado, al abrirlo).</p>
+            <div id="lista-programadas"></div>
+          </section>
           <div class="vacio" id="trabajos-vacio">
             <svg class="vacio-ic"><use href="#icono-app"/></svg>
             <h2>No hay descargas todavía</h2>
@@ -130,6 +135,7 @@
               <label class="interruptor"><input type="checkbox" id="op-deduplicar" checked><span></span><div><b>Evitar duplicados</b><small>Un archivo repetido no se baja dos veces.</small></div></label>
               <label class="interruptor"><input type="checkbox" id="op-html" checked><span></span><div><b>Archivo HTML</b><small>Genera una web navegable del canal.</small></div></label>
               <label class="interruptor"><input type="checkbox" id="op-notificar" checked><span></span><div><b>Notificarme</b><small>Aviso en Mensajes guardados al terminar.</small></div></label>
+              <label class="interruptor"><input type="checkbox" id="op-takeout"><span></span><div><b>Modo exportación (Takeout)</b><small>Menos esperas en canales enormes. La primera vez Telegram pide confirmarlo en la app.</small></div></label>
             </div>
 
             <details class="avanzado">
@@ -149,12 +155,22 @@
               <div class="rejilla">
                 <label>Nombres de archivo<select class="campo" id="op-nombres"><option value="original">Nombre original</option><option value="texto">Según el texto del mensaje</option></select></label>
                 <label>Descargas simultáneas: <b id="hilos-val">3</b><input type="range" min="1" max="8" value="3" id="op-hilos"></label>
+                <label>Conexiones por archivo grande: <b id="conexiones-val">4</b><input type="range" min="1" max="8" value="4" id="op-conexiones"></label>
                 <label>Límite de velocidad<input class="campo" id="op-limite" placeholder="sin límite (p. ej. 5MB)"></label>
                 <label>Espacio mínimo libre<input class="campo" id="op-espacio" value="1GB"></label>
-                <label class="ancho">Carpeta de destino<input class="campo" id="op-salida"></label>
+                <label class="ancho">Carpeta de destino<span class="con-boton"><input class="campo" id="op-salida"><button type="button" class="btn" id="btn-examinar">Examinar…</button></span></label>
               </div>
             </details>
           </fieldset>
+
+          <details class="avanzado" id="programar">
+            <summary>⏰ Programar (repetir sola cada día)</summary>
+            <div class="rejilla">
+              <label>Hora<input class="campo" type="time" id="prog-hora" value="03:00"></label>
+              <div class="ancho"><small>Días</small><div class="chips" id="prog-dias"></div></div>
+            </div>
+            <button class="btn" id="btn-programar" disabled>Guardar programación</button>
+          </details>
 
           <div class="barra-accion">
             <div id="resumen-accion">Selecciona al menos una cuenta y un canal.</div>

@@ -1,16 +1,20 @@
 """Rutas del proyecto, lectura/escritura del .env y asistente de credenciales."""
 import os
 import re
+import sys
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent.parent
+# Carpeta del programa (donde van .env, sesiones/, datos.db y descargas/). En el .exe de
+# PyInstaller __file__ apunta a una carpeta temporal, así que se usa la del ejecutable.
+BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
 RUTA_ENV = BASE / ".env"
 SESIONES = BASE / "sesiones"
 RUTA_BD = BASE / "datos.db"
 SALIDA_POR_DEFECTO = BASE / "descargas"
 
 _CLAVES_ENTORNO = ("API_ID", "API_HASH", "CANAL", "CARPETA_DESTINO", "HILOS", "CUENTAS", "REPARTO", "PUERTO_PANEL",
-                   "NOMBRE_DISPOSITIVO", "SISTEMA_DISPOSITIVO", "VERSION_APP")
+                   "NOMBRE_DISPOSITIVO", "SISTEMA_DISPOSITIVO", "VERSION_APP",
+                   "CONEXIONES", "CIFRAR_SESIONES")
 
 
 def cargar_config() -> dict:

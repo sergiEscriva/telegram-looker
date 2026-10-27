@@ -1,5 +1,6 @@
 """Motor de descarga: recorre canales, aplica filtros, descarga en paralelo con una o varias cuentas."""
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -46,10 +47,13 @@ class Opciones:
     espacio_minimo: int = 1024 ** 3    # deja al menos 1 GB libre
     notificar: bool = True
     reparto: str = "canal"             # "canal" | "mensajes"
+    conexiones: int = 4                # trozos que se piden a la vez de cada archivo grande
+    takeout: bool = False              # modo exportación de Telegram (menos esperas en historiales enormes)
 
     def validar(self):
         self.salida = Path(self.salida)
         self.hilos = max(1, min(int(self.hilos), 10))
+        self.conexiones = max(1, min(int(self.conexiones), 8))
         self.tipos = parse_lista(self.tipos) or set(TIPOS)
         malos = self.tipos - set(TIPOS)
         if malos:
@@ -65,7 +69,7 @@ class Opciones:
         """Construye las opciones a partir de textos (CLI / panel web)."""
         o = cls()
         for clave in ("salida", "hilos", "albumes", "nombres", "comentarios", "seguir", "html",
-                      "deduplicar", "notificar", "reparto", "buscar"):
+                      "deduplicar", "notificar", "reparto", "buscar", "conexiones", "takeout"):
             if d.get(clave) not in (None, ""):
                 setattr(o, clave, d[clave])
         o.tipos = parse_lista(d.get("tipos"))
@@ -79,6 +83,11 @@ class Opciones:
         if d.get("espacio_minimo") not in (None, ""):
             o.espacio_minimo = parse_tamano(d["espacio_minimo"])
         return o.validar()
+
+
+# Descarga por trozos: Telegram sirve como máximo 512 KB por petición, alineados a 4 KB.
+TROZO = 512 * 1024
+MIN_TROCEADO = 4 * 1024 * 1024  # los documentos de 4 MB o más se bajan por trozos (en paralelo y reanudables)
 
 
 class SinEspacio(Exception):
@@ -121,6 +130,8 @@ class Contexto:
     descargas: list = field(default_factory=list)
     canales: set = field(default_factory=set)   # canales reservados en _CANALES_ACTIVOS por este trabajo
     reservado: list = field(default_factory=lambda: [0])  # bytes de descargas en curso (para el espacio libre)
+    en_curso: dict = field(default_factory=dict)  # clave de archivo -> Event (descargas en marcha, para duplicados)
+    reales: dict = field(default_factory=dict)  # cuenta -> cliente normal (si se usa Takeout, el cliente va envuelto)
 
 
 class _LogTelethon(logging.Handler):
@@ -195,6 +206,7 @@ async def listar_dialogos(cliente) -> list:
 class DescargaCanal:
     def __init__(self, ctx: Contexto, cliente, cuenta: str, entidad, particion=(0, 1)):
         self.ctx, self.cliente, self.cuenta, self.entidad = ctx, cliente, cuenta, entidad
+        self.real = ctx.reales.get(cuenta, cliente)  # para eventos y mensajes (fuera del modo Takeout)
         self.k, self.n = particion
         self.canal_id = utils.get_peer_id(entidad)
         self.titulo = getattr(entidad, "title", None) or getattr(entidad, "username", None) or str(self.canal_id)
@@ -322,7 +334,8 @@ class DescargaCanal:
         self.ctx.bd.guardar_mensaje(
             canal_id, msg.id, estado, origen=self.canal_id, cuenta=self.cuenta,
             fecha=msg.date.isoformat() if msg.date else None,
-            texto=getattr(msg, "message", None) or None, album=getattr(msg, "grouped_id", None), **campos)
+            texto=getattr(msg, "message", None) or None, album=getattr(msg, "grouped_id", None),
+            vistas=getattr(msg, "views", None), **campos)
         if canal_id == self.canal_id and estado != "fallo":
             self.hechos.add(msg.id)
         self.cambios = True
@@ -489,7 +502,10 @@ class DescargaCanal:
             self.stats["ok"] += 1
             return
 
+        en_curso = self.ctx.en_curso
         if o.deduplicar and clave:
+            while clave in en_curso:  # el mismo archivo se está bajando ahora por otro mensaje: se espera
+                await en_curso[clave].wait()
             previo = self.ctx.bd.buscar_archivo(clave)
             if previo:
                 ruta_prev = Path(previo["ruta"])
@@ -505,10 +521,14 @@ class DescargaCanal:
             raise SinEspacio(f"Espacio insuficiente en disco ({tamano_legible(libre)} libres). Descarga detenida.")
 
         reservado[0] += tamano  # cuenta lo que ocuparán las descargas que ya están en marcha
+        listo = en_curso[clave] = asyncio.Event() if clave else None
         try:
             correcto = await self._descargar(slot, msg, destino)
         finally:
             reservado[0] -= tamano
+            if listo is not None:
+                en_curso.pop(clave, None)
+                listo.set()
         if correcto:
             self._registrar(msg, "ok", ruta=str(destino), **campos)
             self.ctx.bd.guardar_archivo(clave, destino, tamano)
@@ -521,12 +541,20 @@ class DescargaCanal:
 
     async def _descargar(self, slot, msg, destino: Path, intentos: int = 6) -> bool:
         tmp = destino.with_name(destino.name + ".part")
+        marca = destino.with_name(destino.name + ".part.ok")  # trozos ya completos (para reanudar)
         informe = self.ctx.informe
+        tamano = msg.file.size or 0
+        troceado = getattr(msg, "document", None) is not None and tamano >= MIN_TROCEADO
         for intento in range(1, intentos + 1):
             try:
-                tmp.unlink(missing_ok=True)
                 informe.archivo_fin(slot)
-                informe.archivo_inicio(slot, destino.name, msg.file.size or 0)
+                if troceado:
+                    await self._descargar_troceado(slot, msg, tmp, marca, tamano)
+                    os.replace(tmp, destino)
+                    self._borrar(marca)
+                    return True
+                tmp.unlink(missing_ok=True)
+                informe.archivo_inicio(slot, destino.name, tamano)
                 ultimo = [0]
 
                 async def progreso(recibido, _total):
@@ -542,7 +570,8 @@ class DescargaCanal:
                 os.replace(tmp, destino)
                 return True
             except (Detenido, asyncio.CancelledError):
-                self._borrar(tmp)
+                if not troceado:  # lo troceado se conserva para seguir la próxima vez
+                    self._borrar(tmp)
                 raise
             except errors.FloodWaitError as e:
                 informe.log(f"⏳ Telegram pide esperar {e.seconds}s (FloodWait)...", "aviso")
@@ -558,8 +587,81 @@ class DescargaCanal:
                 informe.log(f"Mensaje {msg.id}: {type(e).__name__}: {e} -> reintento {intento}/{intentos} en {espera}s",
                             "aviso")
                 await asyncio.sleep(espera)
-        self._borrar(tmp)
+        if not troceado:
+            self._borrar(tmp)
         return False
+
+    @staticmethod
+    def _trozos_hechos(tmp: Path, marca: Path) -> int:
+        """Cuántos trozos del principio de un .part ya están bien descargados."""
+        try:
+            hechos = int(marca.read_text(encoding="utf-8").strip())
+            return max(0, min(hechos, tmp.stat().st_size // TROZO))
+        except (OSError, ValueError):
+            return 0
+
+    async def _descargar_troceado(self, slot, msg, tmp: Path, marca: Path, tamano: int):
+        """Descarga un documento por trozos de 512 KB, varios a la vez, y reanudable.
+
+        Los trozos se escriben en su posición dentro del .part; en `marca` se guarda cuántos
+        trozos seguidos desde el principio están completos, así que si se corta (Detener, sin
+        conexión, cierre del programa) la siguiente vez se sigue desde ahí.
+        """
+        informe, ctx = self.ctx.informe, self.ctx
+        total = -(-tamano // TROZO)
+        hechos = self._trozos_hechos(tmp, marca) if tmp.exists() else 0
+        if hechos == 0:
+            self._borrar(tmp)
+        elif hechos < total:
+            informe.log(f"↻ {tmp.name[:-5]}: se reanuda al {hechos * 100 // total}%")
+        recibido = [min(tamano, hechos * TROZO)]
+        informe.archivo_inicio(slot, tmp.name[:-5], tamano, recibido[0])
+        pendientes = iter(range(hechos, total))
+        completos, prefijo = set(), [hechos]
+        documento = msg.document
+
+        with open(tmp, "r+b" if tmp.exists() else "w+b") as f:
+            def guardar_marca():
+                f.flush()  # primero los datos y luego la marca: la marca nunca va por delante
+                marca.write_text(str(prefijo[0]), encoding="utf-8")
+
+            async def obrero():
+                for i in pendientes:  # el iterador es compartido: cada trozo lo pide un solo obrero
+                    if ctx.detener.is_set():
+                        raise Detenido()
+                    partes = [c async for c in self.cliente.iter_download(
+                        documento, offset=i * TROZO, limit=1, request_size=TROZO, file_size=tamano)]
+                    datos = b"".join(partes)
+                    esperado = min(TROZO, tamano - i * TROZO)
+                    if len(datos) != esperado:
+                        raise ConnectionError(f"trozo {i} incompleto ({len(datos)} de {esperado} bytes)")
+                    f.seek(i * TROZO)
+                    f.write(datos)
+                    completos.add(i)
+                    avanzado = False
+                    while prefijo[0] in completos:
+                        completos.discard(prefijo[0])
+                        prefijo[0] += 1
+                        avanzado = True
+                    if avanzado and prefijo[0] % 8 == 0:
+                        guardar_marca()
+                    recibido[0] += len(datos)
+                    informe.archivo_progreso(slot, recibido[0])
+                    await ctx.limitador.consumir(len(datos))
+
+            tareas = [asyncio.create_task(obrero()) for _ in range(min(ctx.opc.conexiones, max(1, total - hechos)))]
+            try:
+                await asyncio.gather(*tareas)
+            except BaseException:
+                for t in tareas:
+                    t.cancel()
+                await asyncio.gather(*tareas, return_exceptions=True)
+                raise
+            finally:
+                guardar_marca()
+            f.truncate(tamano)
+        if tmp.stat().st_size != tamano:
+            raise OSError(f"tamaño final incorrecto ({tmp.stat().st_size} de {tamano} bytes)")
 
     @staticmethod
     def _borrar(ruta: Path):
@@ -581,11 +683,11 @@ class DescargaCanal:
             await self.procesar(msg)
 
         self.manejador = manejador
-        self.cliente.add_event_handler(manejador, events.NewMessage(chats=[self.entidad]))
+        self.real.add_event_handler(manejador, events.NewMessage(chats=[self.entidad]))
 
     async def cerrar(self):
         if self.manejador:
-            self.cliente.remove_event_handler(self.manejador)
+            self.real.remove_event_handler(self.manejador)
             self.manejador = None
         for t in self.trabajadores:
             t.cancel()
@@ -608,7 +710,7 @@ async def _al_terminar_canal(ctx: Contexto, grupo: list):
             ctx.informe.log(f"No se pudo generar el HTML: {e}", "aviso")
     if ctx.opc.notificar and not ctx.detener.is_set():
         try:
-            await principal.cliente.send_message(
+            await principal.real.send_message(
                 "me", f"✅ Descarga terminada: «{principal.titulo}»\n{resumen_stats(stats)}\n📂 {principal.carpeta}")
         except Exception as e:  # noqa: BLE001
             ctx.informe.log(f"No se pudo enviar la notificación: {e}", "aviso")
@@ -697,6 +799,33 @@ async def _vigilar(ctx: Contexto):
                     ctx.informe.log(f"No se pudo actualizar el HTML: {e}", "aviso")
 
 
+async def _entrar_takeout(pila: contextlib.AsyncExitStack, nombre: str, cliente, informe: Informe):
+    """Abre una sesión Takeout (exportación de datos) para la cuenta; si no se puede, sigue sin ella."""
+    pedir = dict(finalize=True, channels=True, megagroups=True, chats=True, files=True, max_file_size=4 * 1024 ** 3)
+    for intento in range(2):
+        try:
+            envuelto = await pila.enter_async_context(cliente.takeout(**pedir))
+            informe.log(f"[{nombre}] modo Takeout activo")
+            return envuelto
+        except errors.TakeoutInitDelayError as e:
+            informe.log(f"[{nombre}] Telegram pide confirmar la exportación de datos: acéptala en el aviso que te ha "
+                        f"llegado a la app (o espera {e.seconds // 3600} h) y vuelve a lanzar la descarga. "
+                        "Mientras, se descarga en modo normal.", "aviso")
+            return cliente
+        except ValueError:
+            if intento == 0:  # quedó una sesión Takeout abierta de una ejecución que se cortó
+                try:
+                    await cliente.end_takeout(success=False)
+                except Exception:  # noqa: BLE001
+                    cliente.session.takeout_id = None
+                continue
+            raise
+        except errors.RPCError as e:
+            informe.log(f"[{nombre}] no se pudo activar Takeout ({e}); se descarga en modo normal.", "aviso")
+            return cliente
+    return cliente
+
+
 async def ejecutar(clientes: dict, objetivos: list, opc: Opciones, informe: Informe = None,
                    bd: BD = None, detener: asyncio.Event = None):
     """Punto de entrada del motor. `clientes` = {nombre_cuenta: TelegramClient conectado}."""
@@ -709,7 +838,11 @@ async def ejecutar(clientes: dict, objetivos: list, opc: Opciones, informe: Info
     for nombre in clientes:
         _LOG_TELETHON.destinos.setdefault(nombre, []).append(informe)
     informe.fase("descargando")
+    ctx.reales = dict(clientes)
+    pila = contextlib.AsyncExitStack()
     try:
+        if opc.takeout:
+            clientes = {n: await _entrar_takeout(pila, n, c, informe) for n, c in clientes.items()}
         if opc.reparto == "mensajes" and len(clientes) > 1:
             await _por_mensajes(ctx, clientes, objetivos)
         else:
@@ -719,6 +852,10 @@ async def ejecutar(clientes: dict, objetivos: list, opc: Opciones, informe: Info
     finally:
         for d in ctx.descargas:
             await d.cerrar()
+        try:
+            await pila.aclose()  # cierra las sesiones Takeout
+        except Exception as e:  # noqa: BLE001
+            informe.log(f"No se pudo cerrar el modo Takeout: {e}", "aviso")
         _CANALES_ACTIVOS.difference_update(ctx.canales)
         for nombre in clientes:
             lista = _LOG_TELETHON.destinos.get(nombre, [])

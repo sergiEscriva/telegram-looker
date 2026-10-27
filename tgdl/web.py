@@ -4,6 +4,7 @@ import json
 import secrets
 import sys
 import time
+from datetime import datetime
 import uuid
 import webbrowser
 from collections import deque
@@ -12,10 +13,12 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 from telethon import errors
 
+from . import registro
 from .bd import BD
 from .config import RUTA_BD, SALIDA_POR_DEFECTO, cargar_config, entero, obtener_credenciales
-from .cuentas import GestorCuentas
-from .html_export import generar_html_async
+from .cuentas import GestorCuentas, pedir_contrasena
+from .exportar import exportar
+from .html_export import CARPETA_PARTES, generar_html_async
 from .informes import Informe
 from .motor import Opciones, ejecutar, listar_dialogos
 from .utilidades import tamano_legible
@@ -41,6 +44,7 @@ class InformeWeb(Informe):
 
     def log(self, texto, nivel="info"):
         self.logs.append({"t": time.time(), "n": nivel, "x": texto})
+        registro.escribir(texto, nivel)
 
     def fase(self, nombre):
         self.fase_actual = nombre
@@ -61,8 +65,9 @@ class InformeWeb(Informe):
         if clave in self.canales:
             self.canales[clave].update(terminado=True, stats=dict(stats))
 
-    def archivo_inicio(self, slot, nombre, total):
-        self.archivos[slot] = {"nombre": nombre, "total": total, "recibido": 0}
+    def archivo_inicio(self, slot, nombre, total, inicial=0):
+        # "inicial" es lo que ya estaba descargado (reanudación): no cuenta para la velocidad
+        self.archivos[slot] = {"nombre": nombre, "total": total, "recibido": inicial}
 
     def archivo_progreso(self, slot, recibido):
         a = self.archivos.get(slot)
@@ -75,9 +80,11 @@ class InformeWeb(Informe):
 
 
 class Trabajo:
-    def __init__(self, cuentas, objetivos, etiquetas, opciones: dict):
+    def __init__(self, cuentas, canales: list, opciones: dict, programada: str = None):
         self.id = uuid.uuid4().hex[:8]
-        self.cuentas, self.objetivos, self.etiquetas, self.opciones = cuentas, objetivos, etiquetas, opciones
+        self.cuentas, self.canales, self.opciones, self.programada = cuentas, canales, opciones, programada
+        self.objetivos = [c["id"] for c in canales]
+        self.etiquetas = [c["nombre"] for c in canales]
         self.estado = "iniciando"
         self.error = None
         self.inicio, self.fin = time.time(), None
@@ -106,6 +113,8 @@ class Trabajo:
             "velocidad": self.velocidad, "bytes": inf.bytes, "bytes_txt": tamano_legible(inf.bytes),
             "canales": list(inf.canales.values()), "archivos": list(inf.archivos.values()),
             "logs": list(inf.logs)[-120:], "seguir": bool(self.opciones.get("seguir")),
+            # para "Repetir": lo necesario para relanzar exactamente la misma descarga
+            "canales_sel": self.canales, "opciones": self.opciones, "programada": self.programada,
         }
 
 
@@ -129,8 +138,8 @@ class TrabajoGuardado:
 # Panel
 # --------------------------------------------------------------------------- #
 class Panel:
-    def __init__(self, api_id, api_hash):
-        self.cuentas = GestorCuentas(api_id, api_hash)
+    def __init__(self, api_id, api_hash, contrasena=None):
+        self.cuentas = GestorCuentas(api_id, api_hash, contrasena)
         self.bd = BD(RUTA_BD)
         self.trabajos: dict = {}
         self.sockets: set = set()
@@ -202,22 +211,114 @@ class Panel:
     async def api_trabajos(self, request):
         return web.json_response([t.foto() for t in self.trabajos.values()])
 
-    async def api_nuevo_trabajo(self, request):
-        d = await request.json()
-        cuentas = [c for c in d.get("cuentas", []) if c in self.cuentas.nombres()]
+    def _validar(self, d: dict):
+        """Comprueba cuentas, canales y opciones de una descarga (nueva o programada)."""
+        cuentas = [c for c in d.get("cuentas") or [] if c in self.cuentas.nombres()]
         if not cuentas:
             raise ValueError("Elige al menos una cuenta.")
-        canales = d.get("canales") or []
+        canales = []
+        for c in d.get("canales") or []:
+            if isinstance(c, dict) and c.get("id") not in (None, ""):
+                canales.append({"id": c["id"], "nombre": str(c.get("nombre") or c["id"])})
+            elif isinstance(c, (str, int)) and str(c).strip():
+                canales.append({"id": c, "nombre": str(c)})
         if not canales:
             raise ValueError("Elige al menos un canal.")
-        objetivos = [c["id"] if isinstance(c, dict) else c for c in canales]
-        etiquetas = [c.get("nombre", str(c["id"])) if isinstance(c, dict) else str(c) for c in canales]
         opciones = d.get("opciones") or {}
         Opciones.desde_dict(opciones)  # valida antes de arrancar
-        trabajo = Trabajo(cuentas, objetivos, etiquetas, opciones)
+        return cuentas, canales, opciones
+
+    def _lanzar(self, cuentas, canales, opciones, programada=None) -> "Trabajo":
+        trabajo = Trabajo(cuentas, canales, opciones, programada)
         self.trabajos[trabajo.id] = trabajo
         trabajo.tarea = asyncio.create_task(self._correr(trabajo))
+        return trabajo
+
+    async def api_nuevo_trabajo(self, request):
+        trabajo = self._lanzar(*self._validar(await request.json()))
         return web.json_response({"id": trabajo.id})
+
+    async def api_repetir(self, request):
+        t = self.trabajos.get(request.match_info["id"])
+        if t is None:
+            raise ValueError("Esa descarga ya no existe.")
+        datos = t.foto()
+        if not datos.get("canales_sel"):
+            raise ValueError("Esta descarga es de una versión anterior del programa y no se puede repetir.")
+        cuentas, canales, opciones = self._validar(
+            {"cuentas": datos["cuentas"], "canales": datos["canales_sel"], "opciones": datos.get("opciones")})
+        return web.json_response({"id": self._lanzar(cuentas, canales, opciones).id})
+
+    # ---- descargas programadas --------------------------------------------
+    async def api_programadas(self, request):
+        res = []
+        for f in self.bd.programadas():
+            d = json.loads(f["datos"])
+            res.append({"id": f["id"], "ultima": f["ultima"], **d})
+        return web.json_response(res)
+
+    async def api_nueva_programada(self, request):
+        d = await request.json()
+        cuentas, canales, opciones = self._validar(d)
+        hora = str(d.get("hora") or "").strip()
+        try:
+            datetime.strptime(hora, "%H:%M")
+        except ValueError:
+            raise ValueError("Hora no válida (formato HH:MM)") from None
+        dias = sorted({int(x) for x in d.get("dias") or range(7) if str(x).isdigit() and 0 <= int(x) <= 6})
+        if not dias:
+            raise ValueError("Elige al menos un día.")
+        datos = {"cuentas": cuentas, "canales": canales, "opciones": opciones, "hora": hora, "dias": dias}
+        prog_id = uuid.uuid4().hex[:8]
+        # Si la hora de hoy ya pasó, no se lanza hasta el próximo día que toque
+        ahora = datetime.now()
+        ultima = ahora.strftime("%Y-%m-%d") if ahora.strftime("%H:%M") >= hora else None
+        self.bd.guardar_programada(prog_id, json.dumps(datos), ultima)
+        return web.json_response({"id": prog_id})
+
+    async def api_borrar_programada(self, request):
+        self.bd.borrar_programada(request.match_info["id"])
+        return web.json_response({"ok": True})
+
+    def revisar_programadas(self, ahora: datetime = None):
+        """Lanza las descargas programadas que tocan (también las que se pasaron hoy con el panel cerrado)."""
+        ahora = ahora or datetime.now()
+        hoy, hora = ahora.strftime("%Y-%m-%d"), ahora.strftime("%H:%M")
+        lanzadas = []
+        for f in self.bd.programadas():
+            d = json.loads(f["datos"])
+            if f["ultima"] == hoy or ahora.weekday() not in d["dias"] or hora < d["hora"]:
+                continue
+            if any(getattr(t, "programada", None) == f["id"] and t.tarea and not t.tarea.done()
+                   for t in self.trabajos.values()):
+                continue  # la anterior aún no ha terminado
+            self.bd.marcar_programada(f["id"], hoy)
+            try:
+                cuentas, canales, opciones = self._validar(d)
+            except ValueError as e:
+                registro.escribir(f"Descarga programada {f['id']} no válida: {e}", "error")
+                continue
+            lanzadas.append(self._lanzar(cuentas, canales, opciones, programada=f["id"]))
+        return lanzadas
+
+    async def programador(self):
+        while True:
+            try:
+                self.revisar_programadas()
+            except Exception as e:  # noqa: BLE001
+                registro.escribir(f"Error revisando descargas programadas: {e}", "error")
+            await asyncio.sleep(30)
+
+    # ---- utilidades ----------------------------------------------------------
+    async def api_elegir_carpeta(self, request):
+        d = await request.json()
+        ruta = await asyncio.to_thread(_dialogo_carpeta, str(d.get("inicial") or ""))
+        return web.json_response({"ruta": ruta})
+
+    async def api_exportar(self, request):
+        d = await request.json()
+        ruta = await asyncio.to_thread(exportar, self.bd, int(request.match_info["canal_id"]), d.get("formato", "csv"))
+        return web.json_response({"ok": True, "ruta": str(ruta)})
 
     async def _correr(self, t: Trabajo):
         try:
@@ -293,6 +394,10 @@ class Panel:
         ext = ruta.suffix.lower().lstrip(".")
         if ruta == base / "index.html":
             cabeceras["Content-Security-Policy"] = "sandbox allow-scripts allow-popups allow-downloads"
+        elif ruta.parent == base / CARPETA_PARTES and ext == "js":
+            # Partes de datos del propio archivo HTML. El tipo se fija a mano porque en Windows
+            # Python a veces lo adivina como text/plain y el navegador (con nosniff) no lo ejecutaría.
+            cabeceras["Content-Type"] = "text/javascript; charset=utf-8"
         elif ext in _EN_LINEA:
             if ext != "pdf":  # el visor de PDF del navegador no funciona dentro de un sandbox
                 cabeceras["Content-Security-Policy"] = "sandbox"
@@ -304,7 +409,7 @@ class Panel:
     async def api_config(self, request):
         cfg = cargar_config()
         return web.json_response({"salida": cfg.get("CARPETA_DESTINO") or str(SALIDA_POR_DEFECTO),
-                                  "hilos": entero(cfg, "HILOS", 3)})
+                                  "hilos": entero(cfg, "HILOS", 3), "conexiones": entero(cfg, "CONEXIONES", 4)})
 
     # ---- tiempo real -------------------------------------------------------
     async def ws(self, request):
@@ -386,7 +491,24 @@ async def errores_json(request, handler):
     except (ValueError, errors.RPCError) as e:
         return web.json_response({"error": str(e)}, status=400)
     except Exception as e:  # noqa: BLE001
+        registro.escribir(f"Error en {request.method} {request.path}: {type(e).__name__}: {e}", "error")
         return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+
+def _dialogo_carpeta(inicial: str = "") -> str:
+    """Abre la ventana de Windows para elegir carpeta (en el PC donde corre el panel)."""
+    try:
+        import tkinter
+        from tkinter import filedialog
+    except ImportError:
+        raise ValueError("Este Python no incluye tkinter: escribe la ruta a mano.") from None
+    raiz = tkinter.Tk()
+    try:
+        raiz.withdraw()
+        raiz.attributes("-topmost", True)  # que no quede detrás del navegador
+        return filedialog.askdirectory(parent=raiz, initialdir=inicial or None, title="Carpeta de destino") or ""
+    finally:
+        raiz.destroy()
 
 
 def crear_app(panel: Panel) -> web.Application:
@@ -405,6 +527,12 @@ def crear_app(panel: Panel) -> web.Application:
     r.add_get("/api/trabajos", panel.api_trabajos)
     r.add_post("/api/trabajos", panel.api_nuevo_trabajo)
     r.add_post("/api/trabajos/{id}/detener", panel.api_detener)
+    r.add_post("/api/trabajos/{id}/repetir", panel.api_repetir)
+    r.add_get("/api/programadas", panel.api_programadas)
+    r.add_post("/api/programadas", panel.api_nueva_programada)
+    r.add_delete("/api/programadas/{id}", panel.api_borrar_programada)
+    r.add_post("/api/elegir-carpeta", panel.api_elegir_carpeta)
+    r.add_post("/api/archivo/{canal_id}/exportar", panel.api_exportar)
     r.add_delete("/api/trabajos/{id}", panel.api_quitar)
     r.add_get("/api/archivo", panel.api_archivo)
     r.add_post("/api/archivo/{canal_id}/html", panel.api_regenerar)
@@ -412,8 +540,8 @@ def crear_app(panel: Panel) -> web.Application:
     return app
 
 
-async def _servir(api_id, api_hash, puerto):
-    panel = Panel(api_id, api_hash)
+async def _servir(api_id, api_hash, puerto, contrasena=None):
+    panel = Panel(api_id, api_hash, contrasena)
     runner = web.AppRunner(crear_app(panel))
     await runner.setup()
     for p in range(puerto, puerto + 20):
@@ -428,11 +556,12 @@ async def _servir(api_id, api_hash, puerto):
     url = f"http://127.0.0.1:{puerto}"
     print(f"\n✨ Panel de TG Downloader en {url}\n   (deja esta ventana abierta; Ctrl+C para cerrar)\n")
     webbrowser.open(url)
-    difusor = asyncio.create_task(panel.difundir())
+    tareas = [asyncio.create_task(panel.difundir()), asyncio.create_task(panel.programador())]
     try:
         await asyncio.Event().wait()
     finally:
-        difusor.cancel()
+        for t in tareas:
+            t.cancel()
         await panel.cerrar()
         await runner.cleanup()
 
@@ -446,6 +575,7 @@ def main():
     api_id, api_hash = obtener_credenciales()
     puerto = entero(cargar_config(), "PUERTO_PANEL", 8765)
     try:
-        asyncio.run(_servir(api_id, api_hash, puerto))
+        contrasena = pedir_contrasena()
+        asyncio.run(_servir(api_id, api_hash, puerto, contrasena))
     except KeyboardInterrupt:
         print("\nPanel cerrado.")

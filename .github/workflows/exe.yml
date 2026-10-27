@@ -1,0 +1,26 @@
+name: Ejecutables Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt "pyinstaller>=6,<7"
+      - run: python -m pip install cryptg
+        continue-on-error: true
+      - run: python -m PyInstaller --noconfirm --onefile --name telegram-looker-panel --add-data "tgdl\estatico;tgdl\estatico" panel.py
+      - run: python -m PyInstaller --noconfirm --onefile --name telegram-looker-consola descargar_canal.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: telegram-looker-windows
+          path: |
+            dist/*.exe
+            .env.ejemplo
